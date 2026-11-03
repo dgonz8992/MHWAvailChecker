@@ -2,7 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
-      <module fileurl="file://$PROJECT_DIR$/.idea/AvailChecker.iml" filepath="$PROJECT_DIR$/.idea/AvailChecker.iml" />
+      <module fileurl="file://$PROJECT_DIR$/.idea/MHWAvailChecker.iml" filepath="$PROJECT_DIR$/.idea/MHWAvailChecker.iml" />
     </modules>
   </component>
 </project>
