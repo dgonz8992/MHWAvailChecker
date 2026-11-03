@@ -10,6 +10,7 @@ class ScrollableFrame(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.canvas = tk.Canvas(self, highlightthickness=0, xscrollincrement=20, yscrollincrement=20)
         vertical = ttk.Scrollbar(self, orient='vertical', command=self.canvas.yview)
+        self.vertical_scrollbar = vertical
         horizontal = ttk.Scrollbar(self, orient='horizontal', command=self.canvas.xview)
         self.canvas.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
         self.canvas.grid(row=0, column=0, sticky='nsew')

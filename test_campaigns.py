@@ -208,6 +208,113 @@ class CampaignDesktopTests(unittest.TestCase):
         self.app._generate()
         self.app.update()
 
+    def open_booking_editor(self, index):
+        from types import SimpleNamespace
+        self.app.table.selection_set(self.app.table.get_children()[index])
+        self.app._edit_schedule_cell(SimpleNamespace(keysym='Return'))
+        self.assertIsNotNone(self.app._schedule_edit)
+        return self.app._schedule_edit[0]
+
+    def test_direct_booking_clear_updates_totals_names_scripts_and_restart(self):
+        self.fill_schedule()
+        editor = self.open_booking_editor(0)
+        editor.delete(0, 'end')
+        editor.focus_force()
+        self.app.update()
+        editor.event_generate('<Return>')
+        self.app.update()
+        self.assertIsNone(self.app.rows[0][1])
+        self.assertIn('Alex: 1 gigs', self.app.totals.get())
+        self.assertEqual(self.app.names_table.item(self.app.names_table.get_children()[0], 'values'), ('',))
+        self.assertEqual(len(self.app.table.get_children()), 4)
+        self.app._show_home()
+        self.app._open_campaign(self.first)
+        self.assertIsNone(self.app.rows[0][1])
+        self.assertIn('Alex: 1 gigs', self.app.totals.get())
+        def texts(parent):
+            for child in parent.winfo_children():
+                if hasattr(child, 'edit_modified'):
+                    yield child.get('1.0', 'end')
+                else:
+                    yield from texts(child)
+        scripts = list(texts(self.app.confirmations))
+        self.assertTrue(any('11/10/2026' in script and '11/3/2026' not in script for script in scripts))
+
+    def test_direct_booking_accepts_unavailable_performer(self):
+        self.fill_schedule()
+        editor = self.open_booking_editor(0)
+        editor.delete(0, 'end')
+        editor.insert(0, 'Sam')  # Sam is available only in January.
+        self.app._finish_schedule_edit()
+        self.assertEqual(self.app.rows[0][1], 'Sam')
+        self.assertIn('Sam: 2 gigs', self.app.totals.get())
+
+    def test_direct_booking_overrides_spacing_on_both_sides(self):
+        self.app._open_campaign(self.first)
+        self.app.dates_text.insert('1.0', '11/3/2026, 11/10/2026, 11/17/2026')
+        self.app._performer_row('Alex', '11/3, 11/10, 11/17')
+        self.app._performer_row('Sam', '11/3, 11/10, 11/17')
+        self.app.gap.set('8')
+        self.app._generate()
+        self.app.update()
+        # Alex, Sam, Alex. Manual edits can put Alex on all three dates.
+        editor = self.open_booking_editor(1)
+        editor.delete(0, 'end')
+        editor.insert(0, 'Alex')
+        self.app._finish_schedule_edit()
+        self.assertEqual([name for _, name in self.app.rows], ['Alex', 'Alex', 'Alex'])
+        self.assertIn('Alex: 3 gigs', self.app.totals.get())
+
+    def test_direct_booking_escape_cancels_and_navigation_commits(self):
+        self.fill_schedule()
+        editor = self.open_booking_editor(0)
+        editor.delete(0, 'end')
+        self.app._finish_schedule_edit(cancel=True)
+        self.assertEqual(self.app.rows[0][1], 'Alex')
+        editor = self.open_booking_editor(0)
+        editor.delete(0, 'end')
+        self.app._show_home()
+        self.assertIsNone(self.app._schedule_edit)
+        self.assertIsNone(self.store.load(self.first)['data']['rows'][0]['performer'])
+
+    def test_direct_booking_blur_commits_and_stale_blur_ignores_new_editor(self):
+        self.fill_schedule()
+        editor = self.open_booking_editor(0)
+        editor.delete(0, 'end')
+        self.app.table.focus_force()
+        self.app._schedule_edit_blurred(editor)
+        self.assertIsNone(self.app.rows[0][1])
+        replacement = self.open_booking_editor(1)
+        self.app._schedule_edit_blurred(editor)
+        self.assertIs(self.app._schedule_edit[0], replacement)
+
+    def test_direct_booking_new_name_saves_counts_and_confirmation(self):
+        self.fill_schedule()
+        editor = self.open_booking_editor(0)
+        editor.delete(0, 'end')
+        editor.insert(0, '  New Artist  ')
+        self.app._finish_schedule_edit()
+        self.assertEqual(self.app.rows[0][1], 'New Artist')
+        self.assertIn('New Artist: 1 gigs', self.app.totals.get())
+        self.assertEqual(len(self.app.confirmations.winfo_children()), 3)
+        self.app._show_home()
+        self.app._open_campaign(self.first)
+        self.assertEqual(self.app.rows[0][1], 'New Artist')
+        self.assertIn('New Artist: 1 gigs', self.app.totals.get())
+
+    def test_direct_booking_pending_autosave_does_not_interrupt_typing(self):
+        self.fill_schedule()
+        self.app._queue_save()
+        editor = self.open_booking_editor(0)
+        editor.delete(0, 'end')
+        editor.insert(0, 'Still typing')
+        self.app.after(650, self.app.quit)
+        self.app.mainloop()
+        self.assertIs(self.app._schedule_edit[0], editor)
+        self.assertEqual(self.app.rows[0][1], 'Alex')
+        self.app._finish_schedule_edit()
+        self.assertEqual(self.app.rows[0][1], 'Still typing')
+
     def test_home_switching_and_restart_restore_exact_schedule_and_scripts(self):
         self.assertTrue(self.app.home.winfo_ismapped())
         self.fill_schedule()

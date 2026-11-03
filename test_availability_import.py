@@ -11,6 +11,51 @@ def dates(text):
     return parse_dates(text, 2026, 10)
 
 
+class WeekdayAvailabilityTests(unittest.TestCase):
+    def setUp(self):
+        self.open_dates = [datetime(2026, 11, 1) + timedelta(days=i) for i in range(95)]
+
+    def test_each_weekday_can_be_included_or_excluded(self):
+        for weekday, name in enumerate(('Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday')):
+            for raw, include in ((f'Only {name}s', True), (f'All except {name}s', False)):
+                with self.subTest(raw=raw):
+                    result = parse_import(f'Alex - {raw}', 2026, 11, self.open_dates)
+                    self.assertEqual(result.availability['Alex'],
+                                     [d for d in self.open_dates if (d.weekday() == weekday) == include])
+                    self.assertFalse(result.notes)
+
+    def test_weekday_groups_multiple_days_and_multiline_exclusions(self):
+        for raw, allowed in (('all except Fridays and Saturdays', {0, 1, 2, 3, 6}),
+                             ('All except\nFridays\nSaturdays', {0, 1, 2, 3, 6}),
+                             ('Only Saturdays and Sundays', {5, 6}),
+                             ('Weekends', {5, 6}), ('All except weekends', set(range(5))),
+                             ('all except weekdays', {5, 6})):
+            with self.subTest(raw=raw):
+                result = parse_import(f'Alex - {raw}', 2026, 11, self.open_dates)
+                self.assertEqual(result.availability['Alex'], [d for d in self.open_dates if d.weekday() in allowed])
+                self.assertFalse(result.notes)
+
+    def test_exclusions_mix_recurring_weekdays_and_specific_dates(self):
+        result = parse_import('Alex - All except Fridays and 11/7/2026', 2026, 11, self.open_dates)
+        self.assertEqual(result.availability['Alex'], [d for d in self.open_dates
+                         if d.weekday() != 4 and d != datetime(2026, 11, 7)])
+        result = parse_import('Alex - All except Friday 11/6 and Saturday 11/7', 2026, 11, self.open_dates)
+        self.assertEqual(result.availability['Alex'], [d for d in self.open_dates
+                         if d not in (datetime(2026, 11, 6), datetime(2026, 11, 7))])
+
+    def test_weekday_exclusion_can_be_scoped_to_a_month(self):
+        result = parse_import('Alex - All except Fridays in November', 2026, 11, self.open_dates)
+        self.assertEqual(result.availability['Alex'], [d for d in self.open_dates if not (d.weekday() == 4 and d.month == 11)])
+
+    def test_no_matching_weekday_is_a_valid_rule(self):
+        saturday = [datetime(2026, 11, 7)]
+        for raw, expected in (('All except Fridays', saturday), ('Only Fridays', [])):
+            with self.subTest(raw=raw):
+                result = parse_import(f'Alex - {raw}', 2026, 11, saturday)
+                self.assertEqual(result.availability, {'Alex': expected})
+                self.assertFalse(result.notes)
+
+
 class MixedAvailabilityTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

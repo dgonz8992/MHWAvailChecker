@@ -8,8 +8,17 @@ def performer_key(name):
     return ' '.join(name.split()).casefold()
 
 
+def validate_performer_names(people):
+    seen = set()
+    for person in people:
+        key = performer_key(person['name'])
+        if key and key in seen:
+            raise ValueError(f"The performer name {person['name'].strip()!r} is already used. Enter a unique name.")
+        seen.add(key)
+
+
 def request_signature(draft, data):
-    value = ['local-import-v1', draft['name'].strip(), draft['availability'].strip(), data.get('open_dates', '')]
+    value = ['local-import-v2', draft['name'].strip(), draft['availability'].strip(), data.get('open_dates', '')]
     return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -47,6 +56,7 @@ def editor_drafts(data):
 
 def sync_inline_performers(data, drafts):
     """Apply the inline roster, using draft IDs to follow renames and removals."""
+    validate_performer_names(drafts)
     previous = {draft['id']: draft for draft in data.get('availability_drafts', [])}
     existing = {performer_key(person['name']): person for person in data.get('performers', [])}
     people, names = [], set()
@@ -70,6 +80,7 @@ def sync_inline_performers(data, drafts):
 
 def sync_schedule_performers(data, people):
     """Apply full-editor changes without replacing unchanged original draft text."""
+    validate_performer_names(people)
     previous = {performer_key(person['name']): person for person in data.get('performers', [])}
     drafts = {performer_key(draft['name']): draft for draft in editor_drafts(data) if draft['name'].strip()}
     updated = []

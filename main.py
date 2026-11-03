@@ -14,7 +14,7 @@ from campaigns import CampaignStore
 from schedule_list import ScheduleList
 from performer_editor import PerformerEditor
 from inline_availability import (performer_key, performer_value, request_signature, format_inline,
-                                 schedule_performers, sync_schedule_performers)
+                                 schedule_performers, sync_schedule_performers, editor_drafts)
 from appearance import PALETTES, configure_appearance, normalize_mode
 
 
@@ -39,6 +39,7 @@ class AvailabilityApp(tk.Tk):
         self.minsize(520, 400)
         self.performers = []
         self.rows = []
+        self._schedule_edit = None
         self.gap = tk.StringVar(value='7')
         self.ai_api_key = tk.StringVar(value='')
         self.ai_model = tk.StringVar(value=configured_model())
@@ -185,13 +186,19 @@ class AvailabilityApp(tk.Tk):
         for key, title, width in [('date', 'Date', 120), ('performer', 'Performer', 350), ('day', 'Day', 120)]:
             self.table.heading(key, text=title)
             self.table.column(key, width=width)
-        scroll = ttk.Scrollbar(table_frame, orient='vertical', command=self.table.yview)
+        scroll = ttk.Scrollbar(table_frame, orient='vertical', command=lambda *args: self._scroll_schedule_table('y', *args))
         self.table.configure(yscrollcommand=scroll.set)
         scroll.pack(side='right', fill='y')
-        table_horizontal = ttk.Scrollbar(table_frame, orient='horizontal', command=self.table.xview)
+        table_horizontal = ttk.Scrollbar(table_frame, orient='horizontal', command=lambda *args: self._scroll_schedule_table('x', *args))
         self.table.configure(xscrollcommand=table_horizontal.set)
         table_horizontal.pack(side='bottom', fill='x')
         self.table.pack(fill='both', expand=True)
+        self.table.bind('<Double-1>', self._edit_schedule_cell)
+        self.table.bind('<Return>', self._edit_schedule_cell)
+        self.table.bind('<Configure>', lambda event: self._finish_schedule_edit())
+        ttk.Label(results, text='Double-click a performer to change the booking, or select a row and press Enter. '
+                  'Type any name; leave blank to clear. Manual edits override scheduling rules.',
+                  style='Muted.TLabel', wraplength=950).pack(anchor='w', pady=(6, 0))
         for modifier in self._copy_modifiers():
             self.table.bind(f'<{modifier}-c>', lambda event: self._copy_schedule(selected_only=bool(self.table.selection())))
         ttk.Label(results, textvariable=self.totals, wraplength=950).pack(anchor='w', pady=(8, 0))
@@ -275,7 +282,8 @@ class AvailabilityApp(tk.Tk):
         ttk.Label(headings, text='NOTES', width=30, style='Caption.TLabel').grid(row=0, column=1, sticky='w')
         ttk.Label(headings, text='LAST SAVED', width=19, style='Caption.TLabel').grid(row=0, column=2, sticky='e')
         ttk.Separator(content, orient='horizontal').pack(fill='x')
-        self.campaign_list = ScheduleList(content, on_context=self._schedule_context_menu, on_expand=self._expand_performers, on_edit_notes=self._edit_inline_notes)
+        self.campaign_list = ScheduleList(content, on_context=self._schedule_context_menu, on_expand=self._expand_performers,
+                                          on_edit_notes=self._edit_inline_notes, expansion_height=self._expansion_height)
         self.campaign_list.pack(fill='both', expand=True)
         self.campaign_list.bind('<<OpenSchedule>>', self._open_selected)
         self.campaign_list.bind('<<ScheduleSelected>>', self._home_selection_changed)
@@ -284,11 +292,19 @@ class AvailabilityApp(tk.Tk):
     def _expand_performers(self, schedule_id, parent):
         return PerformerEditor(parent, self, schedule_id)
 
+    def _expansion_height(self, schedule_id):
+        query = self.schedule_search.get().strip().casefold()
+        drafts = editor_drafts(self.store.load(schedule_id)['data'])
+        count = sum(not query or query in row['name'].casefold() for row in drafts)
+        return max(320, 150 + 70 * count)
+
     def _flush_inline_editors(self):
         return self.campaign_list.flush_editors()
 
     def _inline_editor(self, schedule_id):
         data = self.campaign_list._items.get(schedule_id)
+        if data and data['editor'] is None and schedule_id in self.campaign_list._expanded:
+            return self.campaign_list.ensure_editor(schedule_id)
         return data.get('editor') if data else None
 
     def _inline_status(self, schedule_id, row_id, status, signature=None):
@@ -560,12 +576,25 @@ class AvailabilityApp(tk.Tk):
         self._home_notes_id = schedule_id
         self._home_notes_dirty = False
         self.home_notes.bind('<<Modified>>', self._home_notes_changed)
-        self.home_notes.bind('<FocusOut>', lambda event: self._finish_inline_notes())
+        field = self.home_notes
+        self.home_notes.bind('<FocusOut>', lambda event: self.after_idle(lambda: self._finish_notes_on_blur(field)))
         self.home_notes.bind('<Control-Return>', lambda event: self._finish_inline_notes() and 'break')
         self.home_notes.bind('<Command-Return>', lambda event: self._finish_inline_notes() and 'break')
         self._bind_scrolling(self.home_notes.frame)
         self.home_notes.focus_set()
         return 'break'
+
+    def _finish_notes_on_blur(self, field):
+        # Ignore delayed blur events from an editor that was already replaced,
+        # or a transient focus change that has returned to this text field.
+        if self.home_notes is not field:
+            return
+        focused = self.focus_get()
+        while focused is not None:
+            if focused is field.frame:
+                return
+            focused = focused.master
+        self._finish_inline_notes()
 
     def _finish_inline_notes(self):
         if not self._save_home_notes():
@@ -811,6 +840,7 @@ class AvailabilityApp(tk.Tk):
             self._invalidate()
 
     def _save_campaign(self):
+        self._finish_schedule_edit()
         if self.campaign_id is not None:
             self._flush_input_changes()
             if self.notes_text.edit_modified():
@@ -951,6 +981,8 @@ class AvailabilityApp(tk.Tk):
             if scrollable:
                 view = getattr(widget, axis + 'view')()
                 if view and ((units < 0 and view[0] > 0.000001) or (units > 0 and view[1] < 0.999999)):
+                    if widget is self.table:
+                        self._finish_schedule_edit()
                     getattr(widget, axis + 'view_scroll')(units, 'units')
                     return 'break'
             widget = widget.master
@@ -1054,6 +1086,7 @@ class AvailabilityApp(tk.Tk):
         self._queue_save()
 
     def _clear_results(self):
+        self._finish_schedule_edit(cancel=True)
         self.alternate_button.configure(state='disabled')
         self.arrangement_status.set('')
         self.rows = []
@@ -1073,7 +1106,7 @@ class AvailabilityApp(tk.Tk):
         if name is None:
             return
         name = name.strip()
-        if not name or name.casefold() in [item[0].casefold() for item in self.performers]:
+        if not name or performer_key(name) in [performer_key(item[0]) for item in self.performers]:
             messagebox.showerror('Invalid name', 'Enter a unique, nonempty performer name.', parent=self)
             return
         self._performer_row(name, '')
@@ -1244,6 +1277,7 @@ class AvailabilityApp(tk.Tk):
             entry = existing.get(performer_key(name))
             if entry is None:
                 self._performer_row(name, value)
+                existing[performer_key(name)] = self.performers[-1][1]
             else:
                 entry.delete('1.0', 'end')
                 entry.insert('1.0', value)
@@ -1356,18 +1390,92 @@ class AvailabilityApp(tk.Tk):
         self._queue_save()
 
     def _render_schedule(self):
+        self.table.delete(*self.table.get_children())
+        self.names_table.delete(*self.names_table.get_children())
+        for child in self.confirmations.winfo_children():
+            child.destroy()
         self.alternate_button.configure(state='normal' if self.rows else 'disabled')
         counts = dict.fromkeys((name for name, _, _ in self.performers), 0)
         for date, name in self.rows:
             if name is not None:
                 counts[name] = counts.get(name, 0) + 1
-            self.table.insert('', 'end', values=(date.strftime('%m/%d/%Y'), name or 'No one available', date.strftime('%A')))
+            self.table.insert('', 'end', values=(date.strftime('%m/%d/%Y'), name or 'Unassigned', date.strftime('%A')))
             self.names_table.insert('', 'end', values=(name or '',))
         self._show_confirmations()
         ranked_counts = sorted(counts.items(), key=lambda item: item[1], reverse=True)
         self.totals.set('   •   '.join(f'{name}: {count} gigs' for name, count in ranked_counts))
         unfilled = sum(name is None for _, name in self.rows)
-        self.status.set(f'{len(self.rows)} dates • {len(self.rows) - unfilled} booked • {unfilled} unfilled. Availability and minimum spacing applied.')
+        self.status.set(f'{len(self.rows)} dates • {len(self.rows) - unfilled} booked • {unfilled} unfilled.')
+
+    def _scroll_schedule_table(self, axis, *args):
+        self._finish_schedule_edit()
+        getattr(self.table, axis + 'view')(*args)
+
+    def _edit_schedule_cell(self, event):
+        self._finish_schedule_edit()
+        if event.keysym == 'Return':
+            selected = self.table.selection()
+            item = selected[0] if selected else ''
+        else:
+            if self.table.identify_region(event.x, event.y) != 'cell' or self.table.identify_column(event.x) != '#2':
+                return
+            item = self.table.identify_row(event.y)
+        if not item:
+            return
+        self._flush_input_changes()
+        if not self.table.exists(item):
+            return
+        # Finish any pending autosave before typing begins, so its timer cannot
+        # commit a partially typed name.
+        if not self._save_campaign():
+            return
+        index = self.table.index(item)
+        self.table.selection_set(item)
+        self.table.see(item)
+        box = self.table.bbox(item, 'performer')
+        if not box:
+            return
+        editor = ttk.Entry(self.table)
+        current = self.rows[index][1]
+        editor.insert(0, current or '')
+        editor.selection_range(0, 'end')
+        self._schedule_edit = (editor, index)
+        editor.place(x=box[0], y=box[1], width=box[2], height=box[3])
+        editor.bind('<Return>', lambda event: self._finish_schedule_edit())
+        editor.bind('<Escape>', lambda event: self._finish_schedule_edit(cancel=True))
+        editor.bind('<FocusOut>', lambda event: self.after_idle(self._schedule_edit_blurred, editor))
+        self._bind_scrolling(editor)
+        editor.focus_set()
+        return 'break'
+
+    def _schedule_edit_blurred(self, editor):
+        if self._schedule_edit is None or self._schedule_edit[0] is not editor:
+            return
+        focused = str(self.tk.call('focus'))
+        if focused == str(editor):
+            return
+        self._finish_schedule_edit()
+
+    def _finish_schedule_edit(self, cancel=False):
+        if self._schedule_edit is None:
+            return 'break'
+        editor, index = self._schedule_edit
+        self._schedule_edit = None
+        name = editor.get().strip() or None
+        editor.destroy()
+        if cancel or not 0 <= index < len(self.rows):
+            return 'break'
+        date, previous = self.rows[index]
+        if name == previous:
+            return 'break'
+        self.rows[index] = (date, name)
+        self._render_schedule()
+        item = self.table.get_children()[index]
+        self.table.selection_set(item)
+        self.table.focus(item)
+        self.arrangement_status.set('Booking updated · saved automatically')
+        self._queue_save()
+        return 'break'
 
     def _try_another_arrangement(self):
         self._flush_input_changes()

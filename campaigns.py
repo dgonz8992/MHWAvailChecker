@@ -135,14 +135,7 @@ class CampaignStore:
                     raise ValueError('This schedule no longer exists.')
 
     def set_notes(self, campaign_id, notes):
-        with self._connect() as connection:
-            row = connection.execute('SELECT data FROM campaigns WHERE id = ?', (campaign_id,)).fetchone()
-            if row is None:
-                raise ValueError('This schedule no longer exists.')
-            data = json.loads(row['data'])
-            data['notes'] = notes
-            connection.execute('UPDATE campaigns SET data = ?, updated_at = ? WHERE id = ?',
-                               (json.dumps(data, ensure_ascii=False), self._now(), campaign_id))
+        self.update_fields(campaign_id, {'notes': notes})
 
     def create(self, name, folder_id=None):
         campaign_id = str(uuid.uuid4())

@@ -40,7 +40,7 @@ app = BUNDLE(
     name='MHW Scheduler.app',
     icon='logo/MHW Scheduler.icns',
     bundle_identifier='com.mhw.availabilitychecker',
-    version='1.17.5',
+    version='1.18.2',
     info_plist={
         'CFBundleDisplayName': 'MHW Scheduler',
         'NSHighResolutionCapable': True,

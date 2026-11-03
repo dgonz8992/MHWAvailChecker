@@ -5,7 +5,7 @@ from scrollable import ScrollableFrame
 
 
 class ScheduleList(ScrollableFrame):
-    def __init__(self, master, on_context=None, on_expand=None, on_edit_notes=None):
+    def __init__(self, master, on_context=None, on_expand=None, on_edit_notes=None, expansion_height=None):
         super().__init__(master, padding=0)
         self._items = {}
         self._selected = []
@@ -13,6 +13,10 @@ class ScheduleList(ScrollableFrame):
         self._on_context = on_context
         self._on_edit_notes = on_edit_notes
         self._on_expand = on_expand
+        self._expansion_height = expansion_height
+        self._viewport_job = None
+        self._batch_allowance = None
+        self.canvas.configure(yscrollcommand=self._viewport_changed)
         self._expanded = set()
         self.bind('<Return>', lambda event: self.event_generate('<<OpenSchedule>>'))
 
@@ -23,9 +27,96 @@ class ScheduleList(ScrollableFrame):
             return
         # Let Tk track the content's requested height. Fixing this height keeps
         # Configure from firing when an editor expands or adds performer rows.
-        self.canvas.itemconfigure(self.window, width=max(1, self.canvas.winfo_width()), height=0)
-        self.canvas.configure(scrollregion=(0, 0, max(1, self.canvas.winfo_width()),
-                                            self.content.winfo_reqheight()))
+        width = max(1, self.canvas.winfo_width())
+        if float(self.canvas.itemcget(self.window, 'width')) != width:
+            self.canvas.itemconfigure(self.window, width=width, height=0)
+        region = (0, 0, width, self.content.winfo_reqheight())
+        current = tuple(int(float(value)) for value in str(self.canvas.cget('scrollregion')).split())
+        if current != region:
+            at_bottom = bool(current and current[3] > self.canvas.winfo_height() and self.canvas.yview()[1] >= .999999)
+            self.canvas.configure(scrollregion=region)
+            if at_bottom:
+                self.canvas.yview_moveto(1)
+        self._schedule_viewport()
+
+    def _body_allowance(self, count):
+        # macOS native child coordinates stop behaving correctly beyond 32767
+        # pixels. Keep offscreen editors compact and reserve room for live ones.
+        headers = sum(max(41, item['name'].master.winfo_reqheight() + 1) for item in self._items.values())
+        budget = max(0, 22000 - headers)
+        return max(1, budget // max(1, count))
+
+    def _spacer_height(self, data, allowance=None):
+        if allowance is None:
+            allowance = self._batch_allowance or self._body_allowance(len(self._expanded))
+        return min(data['estimated_height'], 320, allowance)
+
+    def _resize_spacers(self):
+        allowance = self._body_allowance(len(self._expanded))
+        for item, data in self._items.items():
+            if item in self._expanded and data['spacer'] is not None:
+                height = self._spacer_height(data, allowance)
+                if data['spacer'].winfo_reqheight() != height:
+                    data['spacer'].configure(height=height)
+
+    def _viewport_changed(self, first, last):
+        self.vertical_scrollbar.set(first, last)
+        self._schedule_viewport()
+
+    def _schedule_viewport(self):
+        if self._viewport_job is None:
+            self._viewport_job = self.after_idle(self._realize_visible_expansions)
+
+    def _realize_visible_expansions(self):
+        self._viewport_job = None
+        height = max(1, self.canvas.winfo_height())
+        top = self.canvas.canvasy(0)
+        realized = 0
+        for item, data in self._items.items():
+            if item not in self._expanded:
+                continue
+            frame = data['frame']
+            spacer = data['spacer']
+            if frame.winfo_width() <= 1 or (spacer.winfo_manager() and frame.winfo_height() < spacer.winfo_reqheight()):
+                continue  # Placeholder geometry has not propagated yet.
+            near = frame.winfo_y() + frame.winfo_height() >= top - height and frame.winfo_y() <= top + 2 * height
+            if near:
+                needs_layout = data['editor'] is None or not data['editor'].winfo_manager()
+                self.ensure_editor(item)
+                realized += needs_layout
+                if realized >= 2:
+                    break  # Let geometry settle before deciding who is near next.
+            elif data['editor'] is not None and data['editor'].winfo_manager():
+                editor = data['editor']
+                focused = self.focus_get()
+                while focused is not None and focused is not editor:
+                    focused = focused.master
+                if focused is editor or not editor.flush():
+                    continue
+                data['estimated_height'] = max(1, editor.winfo_reqheight())
+                data['spacer'].configure(height=self._spacer_height(data))
+                editor.pack_forget()
+                data['spacer'].pack(fill='x', before=data['separator'])
+                self._schedule_fit()
+
+    def ensure_editor(self, item):
+        data = self._items[item]
+        if data['editor'] is None:
+            data['editor'] = self._on_expand(item, data['frame'])
+        if item in self._expanded and not data['editor'].winfo_manager():
+            data['spacer'].pack_forget()
+            data['editor'].pack(fill='x', before=data['separator'])
+            self._schedule_fit()
+        return data['editor']
+
+    def _schedule_fit(self, event=None):
+        if self._pending_fit is None:
+            self._pending_fit = self.after_idle(self._settle_fit)
+
+    def _settle_fit(self):
+        # Let pack/grid propagate requests before measuring, without forcing a
+        # complete native layout for every individual schedule in Expand all.
+        self._pending_fit = self.after_idle(self._fit)
 
     def get_children(self):
         return tuple(self._items)
@@ -65,9 +156,11 @@ class ScheduleList(ScrollableFrame):
         notes.grid(row=0, column=3, sticky='nsew')
         updated = ttk.Label(row, text=values[2], width=19, style='RowMeta.TLabel')
         updated.grid(row=0, column=4, sticky='e')
-        ttk.Separator(frame, orient='horizontal').pack(fill='x')
+        separator = ttk.Separator(frame, orient='horizontal')
+        separator.pack(fill='x')
         self._items[iid] = {'frame': frame, 'checked': checked, 'values': tuple(values),
-                            'name': name, 'notes': notes, 'updated': updated, 'expand': expand, 'editor': None}
+                            'name': name, 'notes': notes, 'updated': updated, 'expand': expand, 'editor': None,
+                            'separator': separator, 'spacer': None, 'estimated_height': 320}
         for widget in (row, name, notes, updated):
             widget.bind('<Button-1>', lambda event, item=iid: self._select_row(item))
             widget.bind('<Double-1>', lambda event, item=iid: self._open(item))
@@ -83,9 +176,9 @@ class ScheduleList(ScrollableFrame):
                 widget.bind(sequence, lambda event, item=iid: self._context_menu(item, event))
         if iid in self._expanded:
             self._expanded.discard(iid)
-            self.toggle_expanded(iid)
+            self.toggle_expanded(iid, defer=True)
 
-    def toggle_expanded(self, item):
+    def toggle_expanded(self, item, defer=False):
         data = self._items[item]
         if item in self._expanded:
             if data['editor'] is not None and not data['editor'].flush():
@@ -94,19 +187,24 @@ class ScheduleList(ScrollableFrame):
             data['expand'].configure(text='▸')
             if data['editor'] is not None:
                 data['editor'].pack_forget()
-            # Offscreen canvas windows do not always emit Configure on shrink.
-            # Settle pack geometry before refreshing the visible scroll range.
-            self.update_idletasks()
+            if data['spacer'] is not None:
+                data['spacer'].pack_forget()
             self._schedule_fit()
             return
         if self._on_expand is None:
             return
-        if data['editor'] is None:
-            data['editor'] = self._on_expand(item, data['frame'])
-        data['editor'].pack(fill='x', before=data['frame'].winfo_children()[1])
         data['expand'].configure(text='▾')
         self._expanded.add(item)
-        self.update_idletasks()
+        if data['spacer'] is None:
+            estimate = self._expansion_height(item) if self._expansion_height else 320
+            data['estimated_height'] = estimate
+            data['spacer'] = ttk.Frame(data['frame'], height=self._spacer_height(data))
+        if self._batch_allowance is None:
+            self._resize_spacers()
+        if defer:
+            data['spacer'].pack(fill='x', before=data['separator'])
+        else:
+            self.ensure_editor(item)
         self._schedule_fit()
 
     def flush_editors(self):
@@ -115,9 +213,14 @@ class ScheduleList(ScrollableFrame):
     def set_all_expanded(self, expanded):
         if not expanded and not self.flush_editors():
             return False
-        for item in self.get_children():
-            if (item in self._expanded) != expanded:
-                self.toggle_expanded(item)
+        self._batch_allowance = self._body_allowance(len(self._items))
+        try:
+            for item in self.get_children():
+                if (item in self._expanded) != expanded:
+                    self.toggle_expanded(item, defer=expanded)
+        finally:
+            self._batch_allowance = None
+            self._resize_spacers()
         return True
 
     def _context_menu(self, item, event):
@@ -157,6 +260,12 @@ class ScheduleList(ScrollableFrame):
         for item in items:
             self._items.pop(item)['frame'].destroy()
         self._selected = [item for item in self._selected if item in self._items]
+
+    def destroy(self):
+        if self._viewport_job is not None:
+            self.after_cancel(self._viewport_job)
+            self._viewport_job = None
+        super().destroy()
 
     def item(self, item, option=None, **options):
         data = self._items[item]

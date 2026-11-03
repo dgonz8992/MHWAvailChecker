@@ -65,7 +65,7 @@ class ScrollingTests(unittest.TestCase):
         field = MagicMock(spec=tk.Text)
         field.yview.return_value = (0, 1)
         field.master = canvas
-        AvailabilityApp._scroll_in_direction(None, field, 'y', 1)
+        AvailabilityApp._scroll_in_direction(SimpleNamespace(table=None), field, 'y', 1)
         field.yview_scroll.assert_not_called()
         canvas.yview_scroll.assert_called_once_with(1, 'units')
 
@@ -75,8 +75,19 @@ class ScrollingTests(unittest.TestCase):
         canvas.master = None
         scrollbar = MagicMock(spec=ttk.Scrollbar)
         scrollbar.master = SimpleNamespace(winfo_children=lambda: [canvas, scrollbar])
-        AvailabilityApp._scroll_in_direction(None, scrollbar, 'y', 1)
+        AvailabilityApp._scroll_in_direction(SimpleNamespace(table=None), scrollbar, 'y', 1)
         canvas.yview_scroll.assert_called_once_with(1, 'units')
+
+    def test_schedule_scroll_commits_active_booking_before_moving(self):
+        table = MagicMock(spec=ttk.Treeview)
+        table.yview.return_value = (0, .5)
+        table.master = None
+        app = SimpleNamespace(table=table, _finish_schedule_edit=MagicMock())
+        events = []
+        app._finish_schedule_edit.side_effect = lambda: events.append('commit')
+        table.yview_scroll.side_effect = lambda *args: events.append('scroll')
+        AvailabilityApp._scroll_in_direction(app, table, 'y', 1)
+        self.assertEqual(events, ['commit', 'scroll'])
 
 
 if __name__ == '__main__':

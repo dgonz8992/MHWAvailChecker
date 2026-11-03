@@ -24,6 +24,13 @@ DATES = [datetime(2026, 11, 3), datetime(2026, 11, 10)]
 
 
 class InlineStoreTests(unittest.TestCase):
+    def test_duplicate_inline_rename_preserves_previous_saved_data(self):
+        data = self.store.load(self.schedule)['data']
+        second = dict(id='second', name='  PEDRO   MENDEZ ', availability='11/10/2026', status='Draft')
+        with self.assertRaisesRegex(ValueError, 'already used'):
+            self.store.save_inline_editor(self.schedule, [self.draft, second])
+        self.assertEqual(self.store.load(self.schedule)['data'], data)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -112,6 +119,16 @@ class InlineStoreTests(unittest.TestCase):
 
 
 class LocalFormatterTests(unittest.TestCase):
+    def test_weekday_phrases_resolve_against_open_dates(self):
+        open_dates = [datetime(2026, 11, 6), datetime(2026, 11, 7), datetime(2026, 11, 8),
+                      datetime(2026, 11, 13), datetime(2026, 11, 14)]
+        for raw, expected in (('all except fridays', [open_dates[i] for i in (1, 2, 4)]),
+                              ('only saturdays', [open_dates[i] for i in (1, 4)])):
+            with self.subTest(raw=raw):
+                result = format_inline('Pedro Mendez', raw, open_dates)
+                self.assertEqual(result.availability, {'Pedro Mendez': expected})
+                self.assertFalse(result.notes)
+
     def test_same_dates_as_import_for_common_availability(self):
         from availability_import import parse_import
         for raw in ('All', 'November 3 and 10', 'All except 11/10', 'Every Tuesday',
@@ -248,6 +265,29 @@ class InlineDesktopTests(unittest.TestCase):
         self.app._show_home()
         self.assertEqual(self.app._inline_editor(self.schedule).rows[0]['text'].get('1.0', 'end-1c'), raw)
         self.assertEqual(self.errors, [])
+
+    def test_weekday_availability_formats_on_blur_and_generates_correct_days(self):
+        self.store.update_fields(self.schedule, {'open_dates': '11/6/2026, 11/7/2026, 11/8/2026, 11/13/2026, 11/14/2026'})
+        self.app._open_campaign(self.schedule)
+        self.app._performer_row('Alex', '')
+        self.app._performer_row('Sam', '')
+        for (name, field, _), raw, expected in zip(self.app.performers,
+                ('all except fridays', 'only saturdays'),
+                ('11/7/2026, 11/8/2026, 11/14/2026', '11/7/2026, 11/14/2026')):
+            field.focus_force()
+            self.app.update()
+            field.insert('1.0', raw)
+            self.app.update()
+            self.app.page_canvas.event_generate('<Button-1>', x=5, y=5)
+            self.app.update()
+            self.assertEqual(field.get('1.0', 'end-1c'), expected)
+        self.app.gap.set('0')
+        self.app._generate()
+        self.assertEqual([name for _, name in self.app.rows], [None, 'Alex', 'Alex', None, 'Sam'])
+        self.app._show_home()
+        saved = self.store.load(self.schedule)['data']
+        self.assertEqual([p['availability'] for p in saved['performers']],
+                         ['11/7/2026, 11/8/2026, 11/14/2026', '11/7/2026, 11/14/2026'])
 
     def test_full_schedule_unclear_availability_is_preserved_for_review(self):
         self.app._open_campaign(self.schedule)

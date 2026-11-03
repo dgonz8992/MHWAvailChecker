@@ -136,6 +136,11 @@ Formatting happens on your Mac using the import parser. Dates outside the
 schedule’s open dates are excluded. Raw text and any review notes stay saved.
 AI remains an optional feature in the separate Import dialog.
 
+Weekday rules use the schedule's actual open dates: `all except Fridays` excludes
+Friday bookings, and `only Saturdays` includes Saturday bookings. Multiple days
+(`all except Fridays and Saturdays`), `weekdays`, `weekends`, and specific-date
+exceptions (`all except Fridays and 11/7`) also work when you leave the field.
+
 ### Import pasted availability
 
 You can also paste availability directly into a performer’s field inside the
@@ -268,8 +273,13 @@ The chosen arrangement saves automatically, including updated names, totals,
 and confirmation scripts. This is a bounded search, not an exhaustive optimizer.
 
 Input edits clear previous results; generate again to see current results.
-Inputs and results remain in memory for the current session.
-The launcher opens a desktop window; it is not a bundled standalone `.app`.
+To edit a generated booking directly, double-click its performer cell (or select
+the row and press Enter). Type any performer name, or leave the cell blank
+to clear the booking. Press Enter or click away to save; Escape cancels.
+Manual edits override availability and minimum spacing rules. Counts,
+names, and confirmation scripts update with the booking and save with the schedule.
+Inputs and results save locally with each schedule.
+The launcher uses the project environment; the sharing ZIP contains the standalone Mac app.
 
 ### Copying
 
@@ -277,7 +287,7 @@ The launcher opens a desktop window; it is not a bundled standalone `.app`.
   names and their date lists in the `Name - dates` import format.
 - **Copy schedule** copies all generated rows with tab-separated Date, Day, and
   Performer columns for pasting into a spreadsheet. **Copy selected** copies only
-  selected rows, in displayed order. **Copy totals** copies the gig counts.
+  selected rows, in displayed order. **Copy totals** copies the gig counts from most to least.
 - Below the schedule, **Performer names in schedule order** contains one row per
   scheduled date, with repeated names preserved. **Copy names** copies one name
   per line with no header or extra columns, ready to paste into a table column.
@@ -306,3 +316,15 @@ also have their own scrollbars.
 ```sh
 .venv/bin/python -m unittest -v
 ```
+
+For the complete desktop regression and stress suite on a Mac desktop session:
+
+```sh
+MHW_RUN_STRESS_TESTS=1 MHW_RUN_GUI_TESTS=1 .venv-modern/bin/python -m unittest discover -v
+```
+
+The opt-in stress tests use temporary databases and no network services. They
+cover randomized scheduling rules, large imports and libraries, overlapping
+saves, repeated notes edits, synchronized rosters, and large expanded lists.
+Expanded editors load near the visible area so Expand all stays usable without
+building every offscreen editing field at once.

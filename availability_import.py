@@ -209,7 +209,7 @@ def extract_dates(text, year, start_month):
 def _is_bare_name(line):
     if NOTE_RE.match(line) or re.search(r'[.!?:✅]|\b\d', line):
         return False
-    if MONTH_RE.search(line) or ALL_RE.search(line) or WEEKDAY_RE.search(line):
+    if MONTH_RE.search(line) or ALL_RE.search(line) or _weekdays(line):
         return False
     words = re.findall(r"[A-Za-z][A-Za-z'’\-]*", line)
     return bool(words) and len(words) <= 8 and all(word[0].isupper() or word.lower() in ('the', 'and') for word in words)
@@ -253,6 +253,29 @@ def _weekdays(text):
     if re.search(r'\bweekdays?\b', text, re.I):
         days.update(range(5))
     return days
+
+
+def _read_exclusions(text, reader, open_dates):
+    """Exclude recurring weekdays while keeping dated weekday labels specific.
+
+    "Fridays and 11/7" excludes every Friday plus that date; "Friday 11/6"
+    excludes just the explicit date, even if its weekday label is mistaken.
+    """
+    excluded, has_target = set(), False
+    for part in re.split(r'\s*(?:[,;&]|\band\b)\s*', text, flags=re.I):
+        explicit = reader.read(part)
+        excluded.update(explicit)
+        has_target = has_target or bool(explicit)
+        days = _weekdays(part)
+        recurring = days and (not explicit or re.search(r'\b(?:all|every|each)\b', part, re.I))
+        if recurring:
+            months = {MONTHS[match.group().strip('.').lower()] for match in MONTH_RE.finditer(part)}
+            years = {int(value) for value in WRITTEN_YEAR_RE.findall(part)}
+            excluded.update(date for date in open_dates if date.weekday() in days
+                            and (not months or date.month in months)
+                            and (not years or date.year in years))
+            has_target = True
+    return excluded, has_target
 
 
 def _prepare_clauses(lines):
@@ -307,6 +330,11 @@ def _parse_block(lines, year, start_month, open_dates):
             base = parts[0]
             exception = parts[1] if len(parts) == 2 else None
             days = _weekdays(base)
+            if except_mode and exception is None and days and not ALL_RE.search(base):
+                parsed, has_target = _read_exclusions(base, reader, open_dates)
+                exclusions.update(parsed)
+                exception_has_dates = exception_has_dates or has_target
+                continue
             base_dates = reader.read(base)
             # A closing phrase such as "all 2027" or "all good" qualifies an
             # explicit list; it does not turn that list into universal availability.
@@ -341,9 +369,9 @@ def _parse_block(lines, year, start_month, open_dates):
                 except_mode = exception is not None
                 if exception is not None:
                     needs_exception = True
-                    parsed = reader.read(exception)
+                    parsed, has_target = _read_exclusions(exception, reader, open_dates)
                     exclusions.update(parsed)
-                    exception_has_dates = exception_has_dates or bool(parsed)
+                    exception_has_dates = exception_has_dates or has_target
                 continue
             if exception is not None:
                 raise ValueError('An exclusion needs an availability rule, such as All except 12/4.')
@@ -360,7 +388,7 @@ def _parse_block(lines, year, start_month, open_dates):
         except ValueError as error:
             raise ValueError(f'Line {number}: {error}') from None
     if needs_exception and not exception_has_dates:
-        raise ValueError('All except needs at least one excluded date.')
+        raise ValueError('All except needs at least one excluded date or weekday.')
     if not result and not using_rule:
         raise ValueError('has no dates. Add available dates or an explicit All rule.')
     return sorted(date for date in result - exclusions if date.year not in blocked_years), reader.notes
