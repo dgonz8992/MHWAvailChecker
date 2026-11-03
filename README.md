@@ -47,7 +47,7 @@ app dialogs, and is remembered on this Mac. Default uses a white background
 with blue primary buttons and green Generate / Save actions. Saved Light
 preferences from older builds are recognized as Default.
 Miami Vice uses a navy background with cyan highlights and pink actions.
-Rose Quartz pairs soft blush surfaces with deep rose buttons and warm plum text.
+Rose Quartz pairs soft pink surfaces with coral buttons, warm accents, and brown text.
 Crimson Noir pairs near-black surfaces with crimson buttons and bright red accents.
 Switching appearance preserves your current selection and unsaved input.
 
