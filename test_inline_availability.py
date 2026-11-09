@@ -489,6 +489,37 @@ class InlineDesktopTests(unittest.TestCase):
         self.assertIn('open dates', row['status'].get())
         self.assertEqual(self.store.load(self.schedule)['data']['availability_drafts'][0]['availability'], 'November 3 and 10')
 
+    def test_repeated_single_name_paste_does_not_append_or_duplicate_rows(self):
+        field = self.editor.rows[0]['entry']
+        field.focus_force()
+        self.app.update()
+        for name in ('Pedro Mendez', 'Pedro Mendez', '  PEDRO   MENDEZ  '):
+            self.app.clipboard_clear()
+            self.app.clipboard_append(name)
+            field.event_generate('<<Paste>>')
+            self.app.update()
+        self.assertEqual([row['name'].get() for row in self.editor.rows], ['Pedro Mendez'])
+        self.editor.add_row()
+        other = self.editor.rows[-1]['entry']
+        other.focus_force()
+        self.app.update()
+        other.event_generate('<<Paste>>')
+        self.app.update()
+        self.assertEqual(other.get(), '')
+        self.assertEqual([row['name'].get() for row in self.editor.rows if row['name'].get()], ['Pedro Mendez'])
+
+    def test_paste_new_name_replaces_selected_name(self):
+        field = self.editor.rows[0]['entry']
+        field.insert(0, 'Old Name')
+        field.focus_force()
+        self.app.update()
+        field.selection_range(0, 'end')
+        self.app.clipboard_clear()
+        self.app.clipboard_append('New Name')
+        field.event_generate('<<Paste>>')
+        self.app.update()
+        self.assertEqual(field.get(), 'New Name')
+
     def test_real_multiline_paste_and_restart(self):
         from main import AvailabilityApp
         self.app.clipboard_clear()

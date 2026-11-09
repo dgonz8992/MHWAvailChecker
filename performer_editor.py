@@ -241,6 +241,12 @@ class PerformerEditor(ttk.Frame):
         if len(text.splitlines()) > 1:
             self.paste_names(text, row)
             return 'break'
+        # Single-name pastes used to fall through to Entry's default insertion,
+        # appending a second copy when the same name was pasted again. Match
+        # the duplicate-name handling used by multiline paste and Paste names.
+        key = performer_key(text)
+        if key and any(performer_key(item['name'].get()) == key for item in self.rows):
+            return 'break'
 
     def paste_names(self, text, target=None):
         names = list(dict.fromkeys(name.strip() for name in text.splitlines() if name.strip()))

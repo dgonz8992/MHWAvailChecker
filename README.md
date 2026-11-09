@@ -3,6 +3,42 @@
 A desktop application for scheduling performers on open dates. Enter open dates
 and add or import performer availability to get started.
 
+The **Templates** button above **Your Library** opens a dedicated page for reusable
+text shared by all schedules. Click **New template**, enter a name and body, and save it. Select
+a saved template to **Edit** or **Delete** it. **Import template** appears inside
+both notes editors and above confirmation scripts. Notes imports append to your
+existing notes and fill schedule-level fields: `@dates` (all open dates),
+`@schedule` (schedule name), `@count` (total booked dates), and `@notes` (existing
+notes). Performer-only fields are not expanded in notes. Confirmation imports replace the current script template and
+expand its `@` fields for each performer. Deleting a saved template leaves
+previously imported text intact.
+
+Click notes to expand them for editing. Drag the **↕** handle in the lower-right
+corner to adjust their height. Clicking away saves the text and restores the
+compact height (or notes preview in the schedules list).
+
+Above confirmation scripts, edit the **Confirmation template** for that schedule.
+Type placeholders or choose **Insert field**; the scripts update automatically.
+`@performer` inserts the performer's name, `@pdates` their confirmed dates,
+`@dates` all schedule open dates, `@count` their gig count, `@schedule` the schedule
+name, and `@notes` its notes. For example: `Hi @performer, you're confirmed for
+@pdates. Thank you!` Use `@@` for a literal `@`. Templates save independently with
+each schedule; **Restore default template** restores the original wording.
+
+Every performer's confirmation script is editable and saves with that schedule.
+The original wording is used until you change the schedule template or edit a
+performer's script. An empty confirmation template also uses the original
+"Confirmed for @pdates…" wording for each performer. Edited performer scripts stay exactly as written through
+regeneration and template changes. **Use template** on a performer restores
+automatic wording and dates. **Copy script** always copies the latest text.
+
+Use **Sort** on the schedules page to choose **None** (the existing default
+order), **Name** (A–Z), **Date added** (newest first), or **Last updated** (newest
+first). **Reverse order** flips the selected sort. Your choice is remembered
+across folders, searches, and app restarts. Creation dates are recorded for new
+schedules; older schedules use their saved timestamp at upgrade because their
+original creation date was not previously stored.
+
 ## Run
 
 In PyCharm, run `main.py` using the project's `.venv-modern` interpreter.
@@ -328,3 +364,4 @@ cover randomized scheduling rules, large imports and libraries, overlapping
 saves, repeated notes edits, synchronized rosters, and large expanded lists.
 Expanded editors load near the visible area so Expand all stays usable without
 building every offscreen editing field at once.
+# MHWScheduler

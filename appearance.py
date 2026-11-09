@@ -79,6 +79,14 @@ def configure_appearance(root, mode='Default'):
         '*Text.highlightThickness': 1, '*Text.highlightBackground': p['line'],
         '*Text.highlightColor': p['accent'], '*Text.padX': 12, '*Text.padY': 10,
         '*Canvas.background': p['surface'], '*Frame.background': p['surface'],
+        '*Toplevel.background': p['surface'],
+        '*Label.background': p['surface'], '*Label.foreground': p['ink'],
+        '*Button.background': p['surface'], '*Button.foreground': p['ink'],
+        '*Button.activeBackground': p['elevated'], '*Button.activeForeground': p['ink'],
+        '*Entry.background': p['elevated'], '*Entry.foreground': p['ink'],
+        '*Entry.insertBackground': p['accent'], '*Entry.selectBackground': p['selection'],
+        '*Entry.selectForeground': p['ink'], '*Entry.highlightBackground': p['surface'],
+        '*Entry.highlightColor': p['accent'],
         '*Menu.background': p['elevated'], '*Menu.foreground': p['ink'],
         '*Menu.activeBackground': p['selection'], '*Menu.activeForeground': p['ink'],
         '*Listbox.background': p['surface'], '*Listbox.foreground': p['ink'],
@@ -132,6 +140,9 @@ def configure_appearance(root, mode='Default'):
     style.configure('Appearance.TMenubutton', font=(family, 11), padding=(12, 6),
                     background=p['elevated'], foreground=p['accent'], borderwidth=0,
                     focuscolor=p['accent'], focusthickness=1)
+    style.configure('Quiet.TMenubutton', font=(family, 11), padding=(8, 4),
+                    background=p['surface'], foreground=p['accent'], borderwidth=0)
+    style.map('Quiet.TMenubutton', background=[('active', p['elevated'])])
     style.configure('TEntry', fieldbackground=p['elevated'], foreground=p['ink'], insertcolor=p['accent'],
                     padding=(10, 8), bordercolor=p['line'], lightcolor=p['line'], darkcolor=p['line'],
                     selectbackground=p['selection'], selectforeground=p['ink'])
@@ -179,6 +190,13 @@ def _recolor_widgets(widget, p):
         widget.configure(background=p['surface'])
     elif isinstance(widget, (tk.Frame, tk.Toplevel)):
         widget.configure(background=p['surface'])
+    elif isinstance(widget, (tk.Label, tk.Button, tk.Entry)):
+        colors = dict(background=p['elevated'] if isinstance(widget, tk.Entry) else p['surface'],
+                      foreground=p['ink'], activebackground=p['elevated'], activeforeground=p['ink'],
+                      insertbackground=p['accent'], selectbackground=p['selection'], selectforeground=p['ink'],
+                      highlightbackground=p['surface'], highlightcolor=p['accent'])
+        supported = widget.keys()
+        widget.configure(**{key: value for key, value in colors.items() if key in supported})
     elif isinstance(widget, tk.Scrollbar):
         # Tk 9 can expose a themed scrollbar through tkinter.Scrollbar. Those
         # controls take their colors from ttk styles rather than Tk options.

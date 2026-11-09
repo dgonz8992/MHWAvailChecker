@@ -11,6 +11,20 @@ from campaigns import CampaignStore
 
 
 class CampaignStoreTests(unittest.TestCase):
+    def test_sorting_keeps_creation_time_when_schedule_is_edited(self):
+        with patch.object(self.store, '_now', return_value='2026-01-01T00:00:00+00:00'):
+            first = self.store.create('Zebra')
+        with patch.object(self.store, '_now', return_value='2026-02-01T00:00:00+00:00'):
+            second = self.store.create('alpha')
+        with patch.object(self.store, '_now', return_value='2026-03-01T00:00:00+00:00'):
+            self.store.save(first, {'notes': 'edited'})
+        for option, expected in (('None', [first, second]), ('Name', [second, first]),
+                                 ('Date added', [second, first]), ('Last updated', [first, second])):
+            self.assertEqual([row['id'] for row in self.store.list_campaigns(sort_by=option)], expected)
+            if option != 'None':
+                self.assertEqual([row['id'] for row in self.store.list_campaigns(sort_by=option, reverse=True)], expected[::-1])
+        self.assertEqual(self.store.load(first)['created_at'], '2026-01-01T00:00:00+00:00')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -71,6 +85,7 @@ class CampaignStoreTests(unittest.TestCase):
             connection.execute("INSERT INTO campaigns VALUES ('old', 'Existing schedule', '{\"notes\": \"Keep me\", \"group\": \"Old group\"}', '2026-11-03T00:00:00+00:00')")
         upgraded = CampaignStore(old)
         listed = upgraded.list_campaigns()[0]
+        self.assertEqual(listed['created_at'], '2026-11-03T00:00:00+00:00')
         self.assertIsNone(listed['folder_id'])
         self.assertEqual(listed['notes'], 'Keep me')
         self.assertEqual(upgraded.list_campaigns(folder_id='')[0]['id'], 'old')
@@ -207,6 +222,152 @@ class CampaignDesktopTests(unittest.TestCase):
         self.app._performer_row('Sam', '1/4/2027')
         self.app._generate()
         self.app.update()
+
+    def test_confirmation_template_updates_copy_and_saves_per_schedule(self):
+        from confirmation_templates import DEFAULT_TEMPLATE
+        self.fill_schedule()
+        template = 'Hi @performer! @schedule: @pdates (@count gigs). Open: @dates. @notes'
+        self.app.notes_text.insert('1.0', 'Bring cables')
+        self.app.template_text.delete('1.0', 'end')
+        self.app.template_text.insert('1.0', template)
+        self.app.after(250, self.app.quit)
+        self.app.mainloop()
+        alex = self.app.confirmations.winfo_children()[0]
+        alex.winfo_children()[0].winfo_children()[1].invoke()
+        self.assertEqual(self.app.clipboard_get(),
+                         'Hi Alex! November: 11/3/2026, 11/10/2026 (2 gigs). '
+                         'Open: 11/3/2026, 11/10/2026, 12/1/2026, 1/4/2027. Bring cables')
+        self.app._open_campaign(self.second)
+        self.assertEqual(self.app.template_text.get('1.0', 'end-1c'), DEFAULT_TEMPLATE)
+        self.app._open_campaign(self.first)
+        self.assertEqual(self.app.template_text.get('1.0', 'end-1c'), template)
+        self.assertEqual(self.store.load(self.first)['data']['confirmation_template'], template)
+        self.assertEqual(len(self.app.rows), 4)
+        self.app._reset_template()
+        self.assertEqual(self.app.template_text.get('1.0', 'end-1c'), DEFAULT_TEMPLATE)
+
+    def test_template_insert_field_replaces_selection_and_typed_at(self):
+        self.fill_schedule()
+        field = self.app.template_text
+        field.delete('1.0', 'end')
+        field.insert('1.0', 'Hi @')
+        self.app._insert_template_field('@performer')
+        self.assertEqual(field.get('1.0', 'end-1c'), 'Hi @performer')
+        field.tag_add('sel', '1.3', 'end-1c')
+        self.app._insert_template_field('@schedule')
+        self.assertEqual(field.get('1.0', 'end-1c'), 'Hi @schedule')
+
+    def test_copy_script_uses_latest_template_before_preview_refresh(self):
+        self.fill_schedule()
+        copy_button = self.app.confirmations.winfo_children()[0].winfo_children()[0].winfo_children()[1]
+        self.app.template_text.delete('1.0', 'end')
+        self.app.template_text.insert('1.0', '@performer has @count gigs')
+        copy_button.invoke()
+        self.assertEqual(self.app.clipboard_get(), 'Alex has 2 gigs')
+        self.app._show_home()
+        self.assertEqual(self.store.load(self.first)['data']['confirmation_template'], '@performer has @count gigs')
+
+    def test_empty_confirmation_template_defaults_for_every_performer_and_restart(self):
+        self.fill_schedule()
+        self.app.template_text.delete('1.0', 'end')
+        self.app._show_confirmations()
+        ending = ('Will send over the gig sheets now. Please make sure all of the details '
+                  'are correct before signing. Thank you!')
+        for name, dates in (('Alex', '11/3/2026, 11/10/2026'), ('Sam', '1/4/2027')):
+            expected = f'Confirmed for {dates}. {ending}'
+            self.assertEqual(self.app.confirmation_editors[name].get('1.0', 'end-1c'), expected)
+            self.app._copy_confirmation(name)
+            self.assertEqual(self.app.clipboard_get(), expected)
+        self.app._show_home()
+        self.assertEqual(self.store.load(self.first)['data']['confirmation_template'], '')
+        self.app._open_campaign(self.first)
+        self.assertEqual(self.app.confirmation_editors['Sam'].get('1.0', 'end-1c'), f'Confirmed for 1/4/2027. {ending}')
+
+    def test_performer_script_edits_copy_save_and_reset_independently(self):
+        self.fill_schedule()
+        original = self.app.confirmation_editors['Alex'].get('1.0', 'end-1c')
+        self.assertEqual(original, 'Confirmed for 11/3/2026, 11/10/2026. Will send over the gig sheets now. '
+                         'Please make sure all of the details are correct before signing. Thank you!')
+        field = self.app.confirmation_editors['Alex']
+        field.delete('1.0', 'end')
+        field.insert('1.0', 'Hi Alex! Your custom confirmation.\nPlease reply today.')
+        self.app._copy_confirmation('Alex')
+        self.assertEqual(self.app.clipboard_get(), 'Hi Alex! Your custom confirmation.\nPlease reply today.')
+        self.assertTrue(self.app.confirmation_editors['Sam'].get('1.0', 'end-1c').startswith('Confirmed for 1/4/2027.'))
+        self.app._open_campaign(self.second)
+        self.app._open_campaign(self.first)
+        self.assertEqual(self.app.confirmation_editors['Alex'].get('1.0', 'end-1c'),
+                         'Hi Alex! Your custom confirmation.\nPlease reply today.')
+        self.app._reset_confirmation('Alex')
+        self.assertEqual(self.app.confirmation_editors['Alex'].get('1.0', 'end-1c'), original)
+        self.app._save_campaign()
+        self.assertEqual(self.store.load(self.first)['data']['confirmation_scripts'], {})
+
+    def test_template_changes_preserve_custom_script_and_its_editor(self):
+        self.fill_schedule()
+        field = self.app.confirmation_editors['Alex']
+        field.delete('1.0', 'end')
+        field.insert('1.0', 'Keep my edited message')
+        self.app.template_text.delete('1.0', 'end')
+        self.app.template_text.insert('1.0', 'Hi @performer: @count gigs')
+        self.app.after(250, self.app.quit)
+        self.app.mainloop()
+        self.assertIs(self.app.confirmation_editors['Alex'], field)
+        self.assertEqual(field.get('1.0', 'end-1c'), 'Keep my edited message')
+        self.assertEqual(self.app.confirmation_editors['Sam'].get('1.0', 'end-1c'), 'Hi Sam: 1 gigs')
+        self.app._show_home()
+        self.assertEqual(self.store.load(self.first)['data']['confirmation_scripts']['Alex'], 'Keep my edited message')
+
+    def test_immediate_navigation_saves_pending_script_edit(self):
+        self.fill_schedule()
+        field = self.app.confirmation_editors['Sam']
+        field.delete('1.0', 'end')
+        field.insert('1.0', 'Custom Sam script')
+        self.app._show_home()
+        self.assertEqual(self.store.load(self.first)['data']['confirmation_scripts'], {'Sam': 'Custom Sam script'})
+        self.app._open_campaign(self.first)
+        self.app._render_schedule()
+        self.assertEqual(self.app.confirmation_editors['Sam'].get('1.0', 'end-1c'), 'Custom Sam script')
+
+    def test_schedule_notes_resize_with_drag_and_collapse_on_click_out(self):
+        self.app._open_campaign(self.first)
+        field = self.app.notes_text
+        field.focus_force()
+        self.app.update()
+        self.assertEqual(int(field.cget('height')), 8)
+        field.insert('1.0', 'Keep this note')
+        grip = field.resize_handle
+        grip.event_generate('<ButtonPress-1>', x=2, y=2, rooty=150)
+        grip.event_generate('<B1-Motion>', x=2, y=2, rooty=350)
+        grip.event_generate('<ButtonRelease-1>', x=2, y=2, rooty=350)
+        self.app.update()
+        self.assertGreater(int(field.cget('height')), 8)
+        self.app.page_canvas.event_generate('<Button-1>', x=5, y=5)
+        self.app.update()
+        self.assertEqual(int(field.cget('height')), 4)
+        self.assertEqual(self.store.load(self.first)['data']['notes'], 'Keep this note')
+
+    def test_inline_notes_resize_then_return_to_compact_preview(self):
+        self.app._refresh_campaigns()
+        self.app.update()
+        row = self.app.campaign_list._items[self.first]['frame']
+        compact = row.winfo_height()
+        self.app._edit_inline_notes(self.first)
+        field = self.app.home_notes
+        field.focus_force()
+        self.app.update()
+        field.insert('1.0', 'Inline note')
+        grip = field.resize_handle
+        grip.event_generate('<ButtonPress-1>', x=2, y=2, rooty=150)
+        grip.event_generate('<B1-Motion>', x=2, y=2, rooty=350)
+        grip.event_generate('<ButtonRelease-1>', x=2, y=2, rooty=350)
+        self.app.update()
+        self.assertGreater(int(field.cget('height')), 8)
+        self.app.campaign_list.canvas.event_generate('<Button-1>', x=5, y=5)
+        self.app.update()
+        self.assertIsNone(self.app.home_notes)
+        self.assertEqual(row.winfo_height(), compact)
+        self.assertEqual(self.store.load(self.first)['data']['notes'], 'Inline note')
 
     def open_booking_editor(self, index):
         from types import SimpleNamespace
@@ -488,6 +649,43 @@ class CampaignDesktopTests(unittest.TestCase):
         self.assertTrue(self.app.home_notes.get('1.0', 'end-1c').endswith('Confirm stage'))
         self.assertEqual(len(self.store.load(self.first)['data']['rows']), 4)
 
+    def test_new_schedule_stays_in_library_and_is_visible_during_search(self):
+        self.app.schedule_search.set('Nonmatching performer')
+        with patch('main.simpledialog.askstring', return_value='New schedule'):
+            self.app._new_campaign()
+        self.app.update()
+        self.assertIsNone(self.app.campaign_id)
+        self.assertTrue(self.app.home.winfo_ismapped())
+        self.assertFalse(self.app.page.winfo_ismapped())
+        self.assertEqual(self.app.schedule_search.get(), '')
+        selected = self.app.campaign_list.selection()
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(self.store.load(selected[0])['name'], 'New schedule')
+        self.assertEqual(self.app.campaign_list.get_children()[0], selected[0])
+        self.app._open_selected()
+        self.assertEqual(self.app.campaign_id, selected[0])
+
+    def test_sort_menu_preserves_notes_filters_folder_and_selection(self):
+        folder = self.store.create_folder('Venue')
+        self.store.move_to_folder([self.first, self.second], folder)
+        self.app.active_folder = folder
+        self.app._refresh_campaigns()
+        self.app.campaign_list.selection_set(self.first)
+        self.app._edit_inline_notes(self.first)
+        self.app.home_notes.insert('1.0', 'Saved while sorting')
+        self.app.sort_menu.invoke(1)  # Name
+        self.assertEqual(self.app.campaign_list.get_children(), (self.second, self.first))
+        self.assertEqual(self.app.campaign_list.selection(), (self.first,))
+        self.assertEqual(self.store.load(self.first)['data']['notes'], 'Saved while sorting')
+        self.assertEqual(self.store.get_setting('schedule_sort'), 'Name')
+        self.app.schedule_search.set('November')
+        self.assertEqual(self.app.campaign_list.get_children(), (self.first,))
+        self.app.schedule_search.set('')
+        self.app.sort_menu.invoke(5)  # Reverse order
+        self.assertEqual(self.app.campaign_list.get_children(), (self.first, self.second))
+        self.assertEqual(self.store.get_setting('schedule_sort_reverse'), '1')
+        self.assertEqual(self.app.active_folder, folder)
+
     def test_folders_switch_create_rename_and_move(self):
         with patch('main.simpledialog.askstring', return_value='Downtown'):
             self.app._new_folder()
@@ -497,7 +695,8 @@ class CampaignDesktopTests(unittest.TestCase):
         self.assertEqual(self.app.campaign_list.get_children(), ())
         with patch('main.simpledialog.askstring', return_value='Night shows'):
             self.app._new_campaign()
-        self.assertEqual(self.store.load(self.app.campaign_id)['folder_id'], folder)
+        self.assertIsNone(self.app.campaign_id)
+        self.assertEqual(self.store.load(self.app.campaign_list.selection()[0])['folder_id'], folder)
         self.app._show_home()
         self.app.update()
         with patch('main.simpledialog.askstring', return_value='Uptown'):

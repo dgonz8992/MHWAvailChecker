@@ -21,6 +21,10 @@ class CampaignStore:
                 id TEXT PRIMARY KEY, name TEXT NOT NULL, data TEXT NOT NULL,
                 updated_at TEXT NOT NULL)''')
             columns = {row['name'] for row in connection.execute('PRAGMA table_info(campaigns)')}
+            if 'created_at' not in columns:
+                connection.execute('ALTER TABLE campaigns ADD COLUMN created_at TEXT')
+                # Old releases only recorded the last update time.
+                connection.execute('UPDATE campaigns SET created_at = updated_at WHERE created_at IS NULL')
             if 'folder_id' not in columns:
                 connection.execute('ALTER TABLE campaigns ADD COLUMN folder_id TEXT')
             connection.execute('CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE)')
@@ -32,6 +36,42 @@ class CampaignStore:
                 connection.executemany('UPDATE folders SET position = ? WHERE id = ?',
                                        [(index, row['id']) for index, row in enumerate(folders)])
             connection.execute('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
+            connection.execute('''CREATE TABLE IF NOT EXISTS templates (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL COLLATE NOCASE UNIQUE,
+                body TEXT NOT NULL, updated_at TEXT NOT NULL)''')
+
+    def list_templates(self):
+        with self._connect() as connection:
+            return [dict(row) for row in connection.execute('SELECT * FROM templates ORDER BY name COLLATE NOCASE')]
+
+    def load_template(self, template_id):
+        with self._connect() as connection:
+            row = connection.execute('SELECT * FROM templates WHERE id = ?', (template_id,)).fetchone()
+        if row is None:
+            raise ValueError('This template no longer exists.')
+        return dict(row)
+
+    def save_template(self, name, body, template_id=None):
+        name = self._name(name, 'template')
+        if not body.strip():
+            raise ValueError('Write some text for the template.')
+        try:
+            with self._connect() as connection:
+                if template_id is None:
+                    template_id = str(uuid.uuid4())
+                    connection.execute('INSERT INTO templates VALUES (?, ?, ?, ?)',
+                                       (template_id, name, body, self._now()))
+                elif connection.execute('UPDATE templates SET name = ?, body = ?, updated_at = ? WHERE id = ?',
+                                        (name, body, self._now(), template_id)).rowcount != 1:
+                    raise ValueError('This template no longer exists.')
+        except sqlite3.IntegrityError:
+            raise ValueError('A template with that name already exists.') from None
+        return template_id
+
+    def delete_template(self, template_id):
+        with self._connect() as connection:
+            if connection.execute('DELETE FROM templates WHERE id = ?', (template_id,)).rowcount != 1:
+                raise ValueError('This template no longer exists.')
 
     def get_setting(self, key, default=None):
         with self._connect() as connection:
@@ -60,7 +100,7 @@ class CampaignStore:
             raise ValueError(f'Enter a {kind} name.')
         return name
 
-    def list_campaigns(self, query='', folder_id=None):
+    def list_campaigns(self, query='', folder_id=None, sort_by='None', reverse=False):
         with self._connect() as connection:
             rows = connection.execute('''SELECT campaigns.*, folders.name AS folder_name FROM campaigns
                 LEFT JOIN folders ON campaigns.folder_id = folders.id
@@ -80,6 +120,15 @@ class CampaignStore:
                 if not any(query in value.casefold() for value in searchable):
                     continue
             schedules.append(schedule)
+        if sort_by == 'Name':
+            schedules.sort(key=lambda item: item['name'].casefold())
+        elif sort_by == 'Date added':
+            schedules.sort(key=lambda item: item['created_at'] or item['updated_at'], reverse=True)
+        elif sort_by not in ('None', 'Last updated'):
+            raise ValueError('Unknown schedule sort option.')
+        # None retains the existing default order: most recently updated first.
+        if reverse and sort_by != 'None':
+            schedules.reverse()
         return schedules
 
     def list_folders(self):
@@ -141,8 +190,9 @@ class CampaignStore:
         campaign_id = str(uuid.uuid4())
         with self._connect() as connection:
             self._check_folder(connection, folder_id)
-            connection.execute('INSERT INTO campaigns (id, name, data, updated_at, folder_id) VALUES (?, ?, ?, ?, ?)',
-                               (campaign_id, self._name(name), '{}', self._now(), folder_id or None))
+            now = self._now()
+            connection.execute('INSERT INTO campaigns (id, name, data, updated_at, folder_id, created_at) VALUES (?, ?, ?, ?, ?, ?)',
+                               (campaign_id, self._name(name), '{}', now, folder_id or None, now))
         return campaign_id
 
     def load(self, campaign_id):

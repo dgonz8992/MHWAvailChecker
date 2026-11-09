@@ -34,6 +34,33 @@ class AppearancePreferenceTests(unittest.TestCase):
 
 @unittest.skipUnless(os.environ.get('MHW_RUN_GUI_TESTS') == '1', 'Requires a desktop session')
 class LiveAppearanceTests(unittest.TestCase):
+    def test_schedule_name_dialog_uses_current_theme(self):
+        from tkinter import simpledialog
+        for mode, palette in PALETTES.items():
+            self.app._change_appearance(mode)
+            observed = {}
+            def inspect_and_close():
+                dialog = next(child for child in self.app.winfo_children() if isinstance(child, tk.Toplevel))
+                try:
+                    observed['dialog'] = dialog.cget('background')
+                    observed['entry'] = dialog.entry.cget('background')
+                    observed['ink'] = dialog.entry.cget('foreground')
+                    def labels(parent):
+                        for child in parent.winfo_children():
+                            if isinstance(child, tk.Label):
+                                yield child.cget('background')
+                            yield from labels(child)
+                    observed['labels'] = list(labels(dialog))
+                finally:
+                    dialog.cancel()
+            self.app.after(100, inspect_and_close)
+            simpledialog.askstring('New schedule', 'Schedule name:', parent=self.app)
+            self.assertEqual(observed['dialog'], palette['surface'])
+            self.assertEqual(observed['entry'], palette['elevated'])
+            self.assertEqual(observed['ink'], palette['ink'])
+            self.assertTrue(observed['labels'])
+            self.assertTrue(all(color == palette['surface'] for color in observed['labels']))
+
     def setUp(self):
         from main import AvailabilityApp
         self.temp = tempfile.TemporaryDirectory()

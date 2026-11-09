@@ -127,6 +127,17 @@ class ScheduleList(ScrollableFrame):
     def selection(self):
         return tuple(item for item in self._items if item in self._selected)
 
+    def see(self, item):
+        if item not in self._items:
+            return
+        self.update_idletasks()
+        row = self._items[item]['frame']
+        top = row.winfo_y()
+        height = max(1, self.content.winfo_reqheight())
+        viewport_top = self.canvas.canvasy(0)
+        if top < viewport_top or top + row.winfo_height() > viewport_top + self.canvas.winfo_height():
+            self.canvas.yview_moveto(top / height)
+
     def selection_set(self, items):
         if isinstance(items, str):
             items = [items]

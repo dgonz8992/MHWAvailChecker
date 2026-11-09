@@ -16,6 +16,9 @@ from performer_editor import PerformerEditor
 from inline_availability import (performer_key, performer_value, request_signature, format_inline,
                                  schedule_performers, sync_schedule_performers, editor_drafts)
 from appearance import PALETTES, configure_appearance, normalize_mode
+from resizable_notes import ResizableNotes
+from confirmation_templates import DEFAULT_TEMPLATE, TEMPLATE_FIELDS, render_confirmation, render_schedule_template
+from template_library import TemplateDialog
 
 
 class AvailabilityApp(tk.Tk):
@@ -34,6 +37,9 @@ class AvailabilityApp(tk.Tk):
         self._loading = True
         self._dirty = False
         self._save_job = None
+        self._template_job = None
+        self.confirmation_overrides = {}
+        self.confirmation_editors = {}
         self.title('MHW Scheduler')
         self.geometry('1180x820')
         self.minsize(520, 400)
@@ -53,6 +59,7 @@ class AvailabilityApp(tk.Tk):
         self._build_ui()
         self._load_defaults()
         self._build_home()
+        self._build_templates_page()
         self._loading = False
         self._show_home()
         self.gap.trace_add('write', self._invalidate)
@@ -130,9 +137,12 @@ class AvailabilityApp(tk.Tk):
         ttk.Label(outer, text='Dates, availability, and bookings in one place.', style='Muted.TLabel').pack(anchor='w', pady=(4, 12))
         organization = ttk.LabelFrame(outer, text='Schedule notes', padding=16)
         organization.pack(fill='x', pady=(0, 12))
-        self.notes_text = ScrolledText(organization, height=4, width=60, wrap='word', undo=True)
+        self.notes_text = ResizableNotes(organization, height=4, width=60, wrap='word', undo=True)
         self.notes_text.pack(fill='x', pady=(4, 0))
         self.notes_text.bind('<<Modified>>', self._notes_changed)
+        self.notes_import = self._template_import_button(self.notes_text.tools,
+                           lambda body: self._import_notes_template(self.notes_text, body), self.notes_text)
+        self.notes_import.pack(side='right', pady=(0, 4))
         ttk.Label(outer, text='Use M/D/YYYY for open dates. Paste availability with the importer or enter dates below.', style='Muted.TLabel').pack(anchor='w', pady=(0, 8))
         inputs = ttk.Frame(outer)
         inputs.pack(fill='both', expand=True)
@@ -223,12 +233,43 @@ class AvailabilityApp(tk.Tk):
         self.names_table.pack(fill='both', expand=True)
         for modifier in self._copy_modifiers():
             self.names_table.bind(f'<{modifier}-c>', lambda event: self._copy_names(bool(self.names_table.selection())))
+        template_panel = ttk.LabelFrame(outer, text='Confirmation template', padding=16)
+        template_panel.pack(fill='x', pady=(12, 0))
+        template_tools = ttk.Frame(template_panel)
+        template_tools.pack(fill='x', pady=(0, 8))
+        ttk.Label(template_tools, text='Saved with this schedule · Scripts update as you type',
+                  style='Muted.TLabel').pack(side='left')
+        self.template_insert = ttk.Menubutton(template_tools, text='Insert field ▾')
+        self.template_insert.pack(side='right')
+        self.confirmation_import = self._template_import_button(template_tools, self._import_confirmation_template)
+        self.confirmation_import.pack(side='right', padx=(0, 8))
+        field_menu = tk.Menu(self.template_insert, tearoff=False)
+        self.template_insert.configure(menu=field_menu)
+        for token, description in TEMPLATE_FIELDS:
+            field_menu.add_command(label=f'{token} — {description}', command=lambda value=token: self._insert_template_field(value))
+        self.template_text = ScrolledText(template_panel, height=4, width=60, wrap='word', undo=True)
+        self.template_text.pack(fill='x')
+        self.template_text.insert('1.0', DEFAULT_TEMPLATE)
+        self.template_text.edit_modified(False)
+        self.template_text.bind('<<Modified>>', self._template_changed)
+        ttk.Label(template_panel, text='@performer  Name     @pdates  Confirmed dates     @dates  Open dates\n'
+                  '@count  Gig count     @schedule  Schedule name     @notes  Notes',
+                  style='Muted.TLabel', wraplength=850).pack(anchor='w', pady=(8, 0))
+        ttk.Button(template_panel, text='Restore default template', style='Quiet.TButton',
+                   command=self._reset_template).pack(anchor='w', pady=(6, 0))
+        ttk.Label(template_panel, text='Each script below is editable and saves automatically. '
+                  'Edited scripts stay as written; Use template restores automatic wording and dates.',
+                  style='Muted.TLabel', wraplength=850).pack(anchor='w', pady=(8, 0))
         self.confirmations = ttk.LabelFrame(outer, text='Confirmation scripts', padding=16)
         self.confirmations.pack(fill='both', expand=True, pady=(12, 0))
         ttk.Label(outer, textvariable=self.status, wraplength=1000, style='Muted.TLabel').pack(anchor='w', pady=(8, 0))
 
     def _build_home(self):
         self.active_folder = None
+        saved_sort = self.store.get_setting('schedule_sort', 'None')
+        self.schedule_sort = tk.StringVar(value=saved_sort if saved_sort in ('None', 'Name', 'Date added', 'Last updated') else 'None')
+        self.sort_reverse = tk.BooleanVar(value=self.store.get_setting('schedule_sort_reverse', '0') == '1')
+        self.sort_label = tk.StringVar(value=f'Sort: {self.schedule_sort.get()} ▾')
         self.home_notes = None
         self.home_notes_status = tk.StringVar()
         self._home_notes_id = None
@@ -242,6 +283,9 @@ class AvailabilityApp(tk.Tk):
         body.pack(fill='both', expand=True)
         sidebar = ttk.Frame(body, padding=(14, 12, 14, 12), style='Sidebar.TFrame')
         body.add(sidebar, weight=0)
+        self.templates_button = ttk.Button(sidebar, text='Templates →', style='Sidebar.TButton', command=self._show_templates)
+        self.templates_button.pack(fill='x', pady=(0, 12))
+        ttk.Separator(sidebar).pack(fill='x', pady=(0, 12))
         ttk.Label(sidebar, text='YOUR LIBRARY', style='Sidebar.TLabel').pack(anchor='w', pady=(0, 8))
         ttk.Label(sidebar, text='Drag folders to reorder', style='SidebarHint.TLabel').pack(anchor='w', pady=(0, 8))
         self.folder_list = ttk.Treeview(sidebar, show='tree', selectmode='browse', height=10, style='Folders.Treeview')
@@ -273,6 +317,15 @@ class AvailabilityApp(tk.Tk):
         ttk.Button(toolbar, text='Clear', style='Quiet.TButton', command=self._clear_filters).pack(side='left', padx=(0, 8))
         ttk.Button(toolbar, text='+ New schedule', style='Compact.Primary.TButton',
                    command=self._new_campaign).pack(side='right')
+        self.sort_button = ttk.Menubutton(toolbar, textvariable=self.sort_label, style='Appearance.TMenubutton')
+        self.sort_button.pack(side='right', padx=(0, 8))
+        self.sort_menu = tk.Menu(self.sort_button, tearoff=False)
+        self.sort_button.configure(menu=self.sort_menu)
+        for option in ('None', 'Name', 'Date added', 'Last updated'):
+            self.sort_menu.add_radiobutton(label=option, variable=self.schedule_sort, value=option, command=self._sort_changed)
+        self.sort_menu.add_separator()
+        self.sort_menu.add_checkbutton(label='Reverse order', variable=self.sort_reverse, command=self._sort_changed)
+        self.sort_menu.entryconfigure(5, state='disabled' if self.schedule_sort.get() == 'None' else 'normal')
         self.schedule_search.trace_add('write', self._filter_changed)
         headings = ttk.Frame(content, padding=(60, 2, 4, 2))
         headings.pack(fill='x')
@@ -289,6 +342,188 @@ class AvailabilityApp(tk.Tk):
         self.campaign_list.bind('<<ScheduleSelected>>', self._home_selection_changed)
         self.home_hint = tk.StringVar()
         ttk.Label(content, textvariable=self.home_hint, wraplength=650, style='Muted.TLabel').pack(anchor='w', pady=(6, 8))
+    def _build_templates_page(self):
+        self.templates_page = ttk.Frame(self, padding=24)
+        ttk.Button(self.templates_page, text='← All schedules', style='Quiet.TButton',
+                   command=self._show_home).pack(anchor='w', pady=(0, 16))
+        ttk.Label(self.templates_page, text='Templates', style='Title.TLabel').pack(anchor='w')
+        ttk.Label(self.templates_page, text='Reusable notes and confirmation scripts for all your schedules.',
+                  style='Muted.TLabel', wraplength=450).pack(anchor='w', pady=(4, 18))
+        actions = ttk.Frame(self.templates_page)
+        actions.pack(fill='x', pady=(0, 12))
+        ttk.Button(actions, text='+ New template', style='Primary.TButton', command=self._new_saved_template).pack(side='left')
+        ttk.Button(actions, text='Edit', command=self._edit_saved_template).pack(side='left', padx=8)
+        ttk.Button(actions, text='Delete', style='Quiet.TButton', command=self._delete_saved_template).pack(side='left')
+        listing = ttk.Frame(self.templates_page)
+        listing.pack(fill='both', expand=True)
+        self.template_list = ttk.Treeview(listing, columns=('preview',), show='tree headings', selectmode='browse')
+        self.template_list.heading('#0', text='NAME')
+        self.template_list.heading('preview', text='TEMPLATE PREVIEW')
+        self.template_list.column('#0', width=220, minwidth=120)
+        self.template_list.column('preview', width=500, minwidth=200)
+        vertical = ttk.Scrollbar(listing, orient='vertical', command=self.template_list.yview)
+        vertical.pack(side='right', fill='y')
+        horizontal = ttk.Scrollbar(listing, orient='horizontal', command=self.template_list.xview)
+        horizontal.pack(side='bottom', fill='x')
+        self.template_list.configure(yscrollcommand=vertical.set, xscrollcommand=horizontal.set)
+        self.template_list.pack(fill='both', expand=True)
+        self.template_list.bind('<Double-1>', lambda event: self._edit_saved_template())
+        self.template_list.bind('<Return>', lambda event: self._edit_saved_template())
+        self.templates_status = tk.StringVar()
+        ttk.Label(self.templates_page, textvariable=self.templates_status, style='Muted.TLabel',
+                  wraplength=450).pack(anchor='w', pady=(12, 0))
+        self._refresh_templates()
+
+    def _show_templates(self):
+        if not self._flush_inline_editors() or not self._finish_inline_notes() or not self._save_campaign():
+            return
+        try:
+            self._refresh_templates()
+        except Exception as error:
+            messagebox.showerror('Templates could not be loaded', str(error), parent=self)
+            return
+        self.campaign_id = None
+        self.home.pack_forget()
+        self.page.pack_forget()
+        self.templates_page.pack(fill='both', expand=True)
+        self.title('Templates — MHW Scheduler')
+
+    def _refresh_templates(self, selected=None):
+        selected = selected or next(iter(self.template_list.selection()), None)
+        templates = self.store.list_templates()
+        self.template_list.delete(*self.template_list.get_children())
+        for template in templates:
+            preview = ' '.join(template['body'].split())
+            self.template_list.insert('', 'end', iid=template['id'], text=template['name'],
+                                      values=(preview[:147] + '…' if len(preview) > 150 else preview,))
+        if selected and self.template_list.exists(selected):
+            self.template_list.selection_set(selected)
+            self.template_list.see(selected)
+        self.templates_status.set(f'{len(templates)} saved templates · Double-click to edit'
+                                  if templates else 'Create your first template, then import it from notes or confirmations.')
+
+    def _new_saved_template(self):
+        dialog = TemplateDialog(self)
+        if dialog.result:
+            self._refresh_templates(dialog.result)
+
+    def _edit_saved_template(self):
+        selected = self.template_list.selection()
+        if not selected:
+            return
+        try:
+            dialog = TemplateDialog(self, self.store.load_template(selected[0]))
+            if dialog.result:
+                self._refresh_templates(dialog.result)
+        except Exception as error:
+            messagebox.showerror('Template could not be opened', str(error), parent=self)
+
+    def _delete_saved_template(self):
+        selected = self.template_list.selection()
+        if not selected:
+            return
+        try:
+            template = self.store.load_template(selected[0])
+            if not messagebox.askyesno('Delete template?', f'Delete “{template["name"]}”?\n\n'
+                                       'Text already imported into schedules will stay.', parent=self):
+                return
+            self.store.delete_template(template['id'])
+            self._refresh_templates()
+        except Exception as error:
+            messagebox.showerror('Template could not be deleted', str(error), parent=self)
+
+    def _template_import_button(self, parent, on_import, notes=None):
+        button = ttk.Menubutton(parent, text='Import template ▾', style='Quiet.TMenubutton')
+        menu = tk.Menu(button, tearoff=False)
+        button.configure(menu=menu)
+        button.template_menu = menu
+        menu.configure(postcommand=lambda: self._populate_template_import(menu, on_import, notes))
+        if notes is not None:
+            menu.bind('<Unmap>', lambda event: self._notes_import_dismissed(notes))
+        return button
+
+    def _populate_template_import(self, menu, on_import, notes=None):
+        menu.delete(0, 'end')
+        try:
+            templates = self.store.list_templates()
+        except Exception as error:
+            messagebox.showerror('Templates could not be loaded', str(error), parent=self)
+            return
+        if notes is not None:
+            notes._menu_open = True
+        for template in templates:
+            menu.add_command(label=template['name'],
+                             command=lambda tid=template['id']: self._load_template_for_import(tid, on_import))
+        if not templates:
+            menu.add_command(label='No saved templates yet', state='disabled')
+        menu.add_separator()
+        menu.add_command(label='+ New template…', command=self._new_saved_template)
+
+    def _notes_import_dismissed(self, notes):
+        if not notes.winfo_exists():
+            return
+        notes._menu_open = False
+        notes._blurred()
+        if self.home_notes is notes:
+            self.after_idle(lambda: self._finish_notes_on_blur(notes))
+
+    def _load_template_for_import(self, template_id, on_import):
+        try:
+            on_import(self.store.load_template(template_id)['body'])
+        except Exception as error:
+            messagebox.showerror('Template could not be imported', str(error), parent=self)
+
+    def _import_notes_template(self, notes, body):
+        if not notes.winfo_exists():
+            return
+        notes._menu_open = False
+        existing = notes.get('1.0', 'end-1c')
+        if notes is self.home_notes:
+            if not self._flush_inline_editors():
+                return
+            campaign = self.store.load(self._home_notes_id)
+            data = campaign['data']
+            open_text = data.get('open_dates', '')
+            schedule_name = campaign['name']
+            booked_count = sum(row.get('performer') is not None for row in data.get('rows', []))
+        else:
+            self._flush_input_changes()
+            open_text = self.dates_text.get('1.0', 'end-1c')
+            schedule_name = self.campaign_name.get()
+            booked_count = sum(name is not None for _, name in self.rows)
+        # Resolve before editing so a malformed date cannot cause a partial import.
+        try:
+            open_dates = parse_open_dates(open_text)
+        except ValueError:
+            if '@dates' in body:
+                raise
+            open_dates = []
+        body = render_schedule_template(body, open_dates=open_dates,
+                                        schedule=schedule_name, notes=existing, booked_count=booked_count)
+        notes.edit_separator()
+        if existing and not existing.endswith('\n'):
+            notes.insert('end-1c', '\n')
+        notes.insert('end-1c', body)
+        notes.edit_separator()
+        notes.focus_set()
+        notes._expand()
+        if notes is self.home_notes:
+            self._home_notes_changed(None)
+            self._save_home_notes()
+        else:
+            self._notes_changed()
+            self._save_campaign()
+
+    def _import_confirmation_template(self, body):
+        self.template_text.edit_separator()
+        self.template_text.delete('1.0', 'end')
+        self.template_text.insert('1.0', body)
+        self.template_text.edit_separator()
+        self._template_changed(None)
+        self._cancel_template_refresh()
+        self._show_confirmations()
+        self._save_campaign()
+
     def _expand_performers(self, schedule_id, parent):
         return PerformerEditor(parent, self, schedule_id)
 
@@ -374,7 +609,8 @@ class AvailabilityApp(tk.Tk):
             return False
         selected = self.campaign_list.selection()
         self._refresh_folders()
-        campaigns = self.store.list_campaigns(self.schedule_search.get(), self.active_folder)
+        campaigns = self.store.list_campaigns(self.schedule_search.get(), self.active_folder,
+                                              self.schedule_sort.get(), self.sort_reverse.get())
         self.campaign_list.delete(*self.campaign_list.get_children())
         for campaign in campaigns:
             updated = datetime.fromisoformat(campaign['updated_at']).astimezone().strftime('%m/%d/%Y %I:%M %p')
@@ -545,6 +781,22 @@ class AvailabilityApp(tk.Tk):
         dialog.grab_set()
         chooser.focus_set()
 
+    def _sort_changed(self):
+        previous = self.store.get_setting('schedule_sort', 'None')
+        previous_reverse = self.store.get_setting('schedule_sort_reverse', '0')
+        if not self._flush_inline_editors() or not self._finish_inline_notes():
+            self.schedule_sort.set(previous)
+            self.sort_reverse.set(previous_reverse == '1')
+            return
+        try:
+            self.store.set_setting('schedule_sort', self.schedule_sort.get())
+            self.store.set_setting('schedule_sort_reverse', '1' if self.sort_reverse.get() else '0')
+            self.sort_label.set(f'Sort: {self.schedule_sort.get()} ▾')
+            self.sort_menu.entryconfigure(5, state='disabled' if self.schedule_sort.get() == 'None' else 'normal')
+            self._refresh_campaigns()
+        except Exception as error:
+            messagebox.showerror('Sort could not be saved', str(error), parent=self)
+
     def _filter_changed(self, *args):
         try:
             if not self._refresh_campaigns():
@@ -568,16 +820,19 @@ class AvailabilityApp(tk.Tk):
         self.campaign_list.selection_set(schedule_id)
         label = self.campaign_list._items[schedule_id]['notes']
         label.grid_remove()
-        self.home_notes = ScrolledText(label.master, height=3, width=1, wrap='word', undo=True,
+        self.home_notes = ResizableNotes(label.master, height=3, width=1, wrap='word', undo=True,
                                        padx=6, pady=4)
         self.home_notes.grid(row=0, column=3, sticky='nsew')
         self.home_notes.insert('1.0', notes)
         self.home_notes.edit_modified(False)
+        self.home_notes.import_button = self._template_import_button(self.home_notes.tools,
+                         lambda body, field=self.home_notes: self._import_notes_template(field, body), self.home_notes)
+        self.home_notes.import_button.pack(side='right', pady=(0, 4))
         self._home_notes_id = schedule_id
         self._home_notes_dirty = False
         self.home_notes.bind('<<Modified>>', self._home_notes_changed)
         field = self.home_notes
-        self.home_notes.bind('<FocusOut>', lambda event: self.after_idle(lambda: self._finish_notes_on_blur(field)))
+        self.home_notes.bind('<FocusOut>', lambda event: self.after_idle(lambda: self._finish_notes_on_blur(field)), add=True)
         self.home_notes.bind('<Control-Return>', lambda event: self._finish_inline_notes() and 'break')
         self.home_notes.bind('<Command-Return>', lambda event: self._finish_inline_notes() and 'break')
         self._bind_scrolling(self.home_notes.frame)
@@ -590,6 +845,8 @@ class AvailabilityApp(tk.Tk):
         if self.home_notes is not field:
             return
         focused = self.focus_get()
+        if field._dragging or field._menu_open:
+            return
         while focused is not None:
             if focused is field.frame:
                 return
@@ -675,6 +932,7 @@ class AvailabilityApp(tk.Tk):
             return
         self.campaign_id = None
         self.page.pack_forget()
+        self.templates_page.pack_forget()
         self.home.pack(fill='both', expand=True)
         self.title('MHW Scheduler')
 
@@ -687,13 +945,17 @@ class AvailabilityApp(tk.Tk):
         if name is None:
             return
         try:
-            if not self._save_home_notes():
+            if not self._flush_inline_editors() or not self._finish_inline_notes():
                 return
             campaign_id = self.store.create(name, self.active_folder)
         except Exception as error:
             messagebox.showerror('Could not create schedule', str(error), parent=self)
             return
-        self._open_campaign(campaign_id)
+        if self.schedule_search.get():
+            self.schedule_search.set('')
+        self._show_home()
+        self.campaign_list.selection_set(campaign_id)
+        self.campaign_list.see(campaign_id)
 
     def _open_selected(self, event=None):
         campaign_id = self._selected_campaign()
@@ -745,16 +1007,25 @@ class AvailabilityApp(tk.Tk):
             return
         self._loading = True
         try:
+            self._cancel_template_refresh()
+            self.notes_text.collapse()
             self.campaign_id = campaign_id
             self.campaign_name.set(campaign['name'])
             self.notes_text.delete('1.0', 'end')
             self.notes_text.insert('1.0', data.get('notes', ''))
             self.notes_text.edit_modified(False)
             self.notes_text.edit_reset()
+            self.template_text.delete('1.0', 'end')
+            self.template_text.insert('1.0', data.get('confirmation_template', DEFAULT_TEMPLATE))
+            self.template_text.edit_modified(False)
+            self.template_text.edit_reset()
             for _, _, frame in self.performers:
                 frame.destroy()
             self.performers = []
             self._clear_results()
+            saved_scripts = data.get('confirmation_scripts', {})
+            self.confirmation_overrides = {name: text for name, text in saved_scripts.items()
+                                           if isinstance(name, str) and isinstance(text, str)} if isinstance(saved_scripts, dict) else {}
             self.dates_text.delete('1.0', 'end')
             self.dates_text.insert('1.0', data.get('open_dates', ''))
             self.dates_text.edit_modified(False)
@@ -773,6 +1044,7 @@ class AvailabilityApp(tk.Tk):
         finally:
             self._loading = False
         self.home.pack_forget()
+        self.templates_page.pack_forget()
         self.page.pack(fill='both', expand=True)
         self.page_canvas.yview_moveto(0)
         self.title(f'{campaign["name"]} — MHW Scheduler')
@@ -789,6 +1061,7 @@ class AvailabilityApp(tk.Tk):
             if campaign_id == self.campaign_id:
                 self.campaign_name.set(name.strip())
                 self.title(f'{name.strip()} — MHW Scheduler')
+                self._queue_template_refresh()
             else:
                 self._refresh_campaigns()
         except Exception as error:
@@ -840,11 +1113,15 @@ class AvailabilityApp(tk.Tk):
             self._invalidate()
 
     def _save_campaign(self):
+        self._capture_confirmation_edits()
         self._finish_schedule_edit()
         if self.campaign_id is not None:
             self._flush_input_changes()
             if self.notes_text.edit_modified():
                 self.notes_text.edit_modified(False)
+                self._queue_save()
+            if self.template_text.edit_modified():
+                self.template_text.edit_modified(False)
                 self._queue_save()
         if self._save_job is not None:
             self.after_cancel(self._save_job)
@@ -856,6 +1133,8 @@ class AvailabilityApp(tk.Tk):
             'minimum_gap': self.gap.get(),
             'ai_model': self.ai_model.get(),
             'notes': self.notes_text.get('1.0', 'end-1c'),
+            'confirmation_template': self.template_text.get('1.0', 'end-1c'),
+            'confirmation_scripts': dict(self.confirmation_overrides),
             'performers': [{'name': name, 'availability': entry.get('1.0', 'end-1c')}
                            for name, entry, _ in self.performers],
             'rows': [{'date': date.isoformat(), 'performer': name} for date, name in self.rows],
@@ -875,31 +1154,143 @@ class AvailabilityApp(tk.Tk):
 
     def _close(self):
         if self._flush_inline_editors() and self._save_home_notes() and self._save_campaign():
+            self._cancel_template_refresh()
             self.destroy()
 
-    def _notes_changed(self, event):
-        if event.widget.edit_modified():
-            event.widget.edit_modified(False)
+    def _notes_changed(self, event=None):
+        if self.notes_text.edit_modified():
+            self.notes_text.edit_modified(False)
+            self._queue_save()
+            self._queue_template_refresh()
+
+    def _cancel_template_refresh(self):
+        if self._template_job is not None:
+            self.after_cancel(self._template_job)
+            self._template_job = None
+
+    def _queue_template_refresh(self):
+        if self._loading:
+            return
+        self._cancel_template_refresh()
+        self._template_job = self.after(180, self._refresh_template_preview)
+
+    def _refresh_template_preview(self):
+        self._template_job = None
+        if self.campaign_id is not None:
+            self._show_confirmations()
+
+    def _template_changed(self, event):
+        if self.template_text.edit_modified():
+            self.template_text.edit_modified(False)
+            if not self._loading:
+                self._queue_save()
+                self._queue_template_refresh()
+
+    def _insert_template_field(self, token):
+        try:
+            self.template_text.delete('sel.first', 'sel.last')
+        except tk.TclError:
+            pass
+        if self.template_text.get('insert-1c', 'insert') == '@':
+            self.template_text.delete('insert-1c', 'insert')
+        self.template_text.insert('insert', token)
+        self.template_text.focus_set()
+
+    def _reset_template(self):
+        self.template_text.delete('1.0', 'end')
+        self.template_text.insert('1.0', DEFAULT_TEMPLATE)
+        self._template_changed(None)
+
+    def _automatic_confirmation(self, name):
+        # Read the live fields even if the short preview debounce is pending.
+        dates = [date for date, performer in self.rows if performer == name]
+        try:
+            open_dates = parse_open_dates(self.dates_text.get('1.0', 'end-1c'))
+        except ValueError:
+            open_dates = []
+        return render_confirmation(self.template_text.get('1.0', 'end-1c'),
+                               performer=name, confirmed_dates=dates, open_dates=open_dates,
+                               schedule=self.campaign_name.get(), notes=self.notes_text.get('1.0', 'end-1c'))
+
+    def _capture_confirmation_edits(self):
+        if self._loading:
+            return
+        changed = False
+        for name, field in self.confirmation_editors.items():
+            if field.winfo_exists() and field.edit_modified():
+                text = field.get('1.0', 'end-1c')
+                field.edit_modified(False)
+                if text == self._automatic_confirmation(name):
+                    self.confirmation_overrides.pop(name, None)
+                else:
+                    self.confirmation_overrides[name] = text
+                changed = True
+        if changed:
             self._queue_save()
 
+    def _confirmation_edited(self, name, field):
+        if self.confirmation_editors.get(name) is field:
+            self._capture_confirmation_edits()
+
+    def _commit_confirmation(self, name, field):
+        if not self._loading and self.campaign_id is not None and self.confirmation_editors.get(name) is field:
+            self._save_campaign()
+
+    def _reset_confirmation(self, name):
+        self._capture_confirmation_edits()
+        self.confirmation_overrides.pop(name, None)
+        self._queue_save()
+        self._show_confirmations()
+
+    def _copy_confirmation(self, name):
+        self._capture_confirmation_edits()
+        return self._copy_text(self.confirmation_overrides.get(name, self._automatic_confirmation(name)))
+
     def _show_confirmations(self):
+        self._capture_confirmation_edits()
         dates_by_performer = {}
         for date, name in self.rows:
             if name is not None:
-                dates_by_performer.setdefault(name, []).append(f'{date.month}/{date.day}/{date.year}')
+                dates_by_performer.setdefault(name, []).append(date)
+        # Update automatic scripts in place, preserving the cursor and undo
+        # history in any performer script the user is currently editing.
+        if list(self.confirmation_editors) == list(dates_by_performer):
+            for name, field in self.confirmation_editors.items():
+                message = self.confirmation_overrides.get(name, self._automatic_confirmation(name))
+                if field.get('1.0', 'end-1c') != message:
+                    field.delete('1.0', 'end')
+                    field.insert('1.0', message)
+                    field.edit_modified(False)
+                    field.edit_reset()
+            return
+        self.confirmation_editors = {}
+        for child in self.confirmations.winfo_children():
+            child.destroy()
+        try:
+            open_dates = parse_open_dates(self.dates_text.get('1.0', 'end-1c'))
+        except ValueError:
+            open_dates = []
+        template = self.template_text.get('1.0', 'end-1c')
         for name, dates in dates_by_performer.items():
-            message = (f'Confirmed for {", ".join(dates)}. Will send over the gig sheets now. '
-                       'Please make sure all of the details are correct before signing. Thank you!')
+            message = render_confirmation(template, performer=name, confirmed_dates=dates,
+                                          open_dates=open_dates, schedule=self.campaign_name.get(),
+                                          notes=self.notes_text.get('1.0', 'end-1c'))
+            message = self.confirmation_overrides.get(name, message)
             frame = ttk.Frame(self.confirmations)
             frame.pack(fill='x', pady=(0, 10))
             heading = ttk.Frame(frame)
             heading.pack(fill='x', pady=(0, 4))
             ttk.Label(heading, text=name).pack(side='left')
             ttk.Button(heading, text='Copy script', style='Quiet.TButton',
-                       command=lambda text=message: self._copy_text(text)).pack(side='right')
-            text = ScrolledText(frame, height=3, width=80, wrap='word')
+                       command=lambda performer=name: self._copy_confirmation(performer)).pack(side='right')
+            ttk.Button(heading, text='Use template', style='Quiet.TButton',
+                       command=lambda performer=name: self._reset_confirmation(performer)).pack(side='right', padx=(0, 8))
+            text = ScrolledText(frame, height=3, width=80, wrap='word', undo=True)
             text.insert('1.0', message)
-            text.configure(state='disabled')
+            text.edit_modified(False)
+            self.confirmation_editors[name] = text
+            text.bind('<<Modified>>', lambda event, performer=name, field=text: self._confirmation_edited(performer, field))
+            text.bind('<FocusOut>', lambda event, performer=name, field=text: self._commit_confirmation(performer, field))
             text.pack(fill='x')
             self._bind_scrolling(frame)
 
@@ -923,6 +1314,8 @@ class AvailabilityApp(tk.Tk):
             if container is not None and clicked is container:
                 return
             clicked = clicked.master
+        if isinstance(focused, ResizableNotes):
+            focused._menu_open = False
         # Labels and blank space don't normally take focus in Tk. Give the
         # clicked widget focus so the field's normal FocusOut commit also runs.
         event.widget.focus_set()
@@ -1035,7 +1428,7 @@ class AvailabilityApp(tk.Tk):
 
     def _copy_menu(self, event):
         widget = event.widget
-        if widget in (self.campaign_list, self.folder_list):
+        if widget in (self.campaign_list, self.folder_list, self.template_list):
             return
         if not isinstance(widget, (tk.Text, tk.Entry, ttk.Entry, tk.Label, ttk.Label, ttk.Treeview)):
             return
@@ -1086,6 +1479,8 @@ class AvailabilityApp(tk.Tk):
         self._queue_save()
 
     def _clear_results(self):
+        self._capture_confirmation_edits()
+        self.confirmation_editors = {}
         self._finish_schedule_edit(cancel=True)
         self.alternate_button.configure(state='disabled')
         self.arrangement_status.set('')
@@ -1392,8 +1787,6 @@ class AvailabilityApp(tk.Tk):
     def _render_schedule(self):
         self.table.delete(*self.table.get_children())
         self.names_table.delete(*self.names_table.get_children())
-        for child in self.confirmations.winfo_children():
-            child.destroy()
         self.alternate_button.configure(state='normal' if self.rows else 'disabled')
         counts = dict.fromkeys((name for name, _, _ in self.performers), 0)
         for date, name in self.rows:
