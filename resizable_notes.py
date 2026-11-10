@@ -7,6 +7,7 @@ from tkinter.scrolledtext import ScrolledText
 class ResizableNotes(ScrolledText):
     def __init__(self, master, **kwargs):
         self.compact_height = kwargs.get('height', 3)
+        self.expanded_height = kwargs.pop('expanded_height', max(8, self.compact_height))
         self._blur_job = None
         self._dragging = False
         self._menu_open = False
@@ -24,20 +25,23 @@ class ResizableNotes(ScrolledText):
 
     def _expand(self, event=None):
         if int(self.cget('height')) == self.compact_height:
-            self.configure(height=max(8, self.compact_height))
+            self.configure(height=self.expanded_height)
 
     def _start_resize(self, event):
         self._dragging = True
         self.focus_set()
+        self._expand()
+        self._resize_line_height = max(1, font.Font(root=self, font=self.cget('font')).metrics('linespace'))
         self._drag_y = event.y_root
         self._drag_height = int(self.cget('height'))
         return 'break'
 
     def _resize(self, event):
         if self._dragging:
-            line = max(1, font.Font(root=self, font=self.cget('font')).metrics('linespace'))
-            height = self._drag_height + round((event.y_root - self._drag_y) / line)
-            self.configure(height=max(2, min(40, height)))
+            height = self._drag_height + round((event.y_root - self._drag_y) / self._resize_line_height)
+            height = max(2, min(40, height))
+            if height != int(self.cget('height')):
+                self.configure(height=height)
         return 'break'
 
     def _end_resize(self, event):

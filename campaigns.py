@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 import sqlite3
 import uuid
-from inline_availability import performer_key, performer_value, request_signature, sync_inline_performers
+from inline_availability import performer_key, performer_value, request_signature, sync_inline_performers, schedule_performers
 
 
 def default_campaign_path():
@@ -228,11 +228,64 @@ class CampaignStore:
     def save_inline_drafts(self, campaign_id, drafts):
         self.save_inline_editor(campaign_id, drafts)
 
+    def save_venues(self, campaign_id, venues, validate=True):
+        from venue_support import schedule_venues, combined_dates, date_text, venue_rule
+        from inline_availability import editor_drafts
+        import re
+        names = [performer_key(v['name']) for v in venues]
+        if validate and (not venues or not all(names) or len(set(names)) != len(names)):
+            raise ValueError('Give each venue a unique, nonempty name.')
+        if len({v['id'] for v in venues}) != len(venues):
+            raise ValueError('Venue IDs must be unique.')
+        try:
+            open_text = date_text(combined_dates(venues))
+        except ValueError:
+            if validate:
+                raise
+            open_text = ', '.join(v['open_dates'] for v in venues if v['open_dates'].strip())
+        def change(data):
+            old = schedule_venues(data)
+            rules = {performer_key(p['name']): venue_rule(data, p['name']) for p in schedule_performers(data)}
+            ids = {v['id'] for v in venues}
+            for rule in rules.values():
+                rule['venues'] = [vid for vid in rule['venues'] if vid in ids]
+            drafts = editor_drafts(data)
+            for original in old:
+                renamed = next((v for v in venues if v['id'] == original['id'] and v['name'] != original['name']), None)
+                if renamed and original['name'].strip():
+                    for draft in drafts:
+                        draft['availability'] = re.sub(r'(?<!\w)' + re.escape(original['name']) + r'(?!\w)',
+                                                       lambda match: renamed['name'], draft['availability'], flags=re.I)
+            data.update(venues=venues, open_dates=open_text, performer_venue_rules=rules,
+                        availability_drafts=drafts, rows=[])
+        self._mutate_data(campaign_id, change)
+
+    def save_performer_venues(self, campaign_id, name, rule, raw, dates):
+        from venue_support import date_text
+        from inline_availability import editor_drafts
+        def change(data):
+            people = schedule_performers(data)
+            person = next((p for p in people if performer_key(p['name']) == performer_key(name)), None)
+            if person is None:
+                raise ValueError('This performer no longer exists.')
+            person['availability'] = date_text(dates)
+            data['performers'] = people
+            data.setdefault('performer_venue_rules', {})[performer_key(name)] = rule
+            drafts = editor_drafts(data)
+            draft = next(d for d in drafts if performer_key(d['name']) == performer_key(name))
+            draft.update(availability=raw, formatted=person['availability'], status='Updated · ' + ('By venue' if rule['mode'] == 'by_venue' else 'Shared dates'))
+            data['availability_drafts'] = drafts
+            draft['last_applied'] = request_signature(draft, data)
+            data['rows'] = []
+        self._mutate_data(campaign_id, change)
+
     def save_inline_editor(self, campaign_id, drafts, open_dates=None):
         def change(data):
             sync_inline_performers(data, drafts)
             if open_dates is not None and open_dates != data.get('open_dates', ''):
                 data['open_dates'] = open_dates
+                if data.get('venues') and len(data['venues']) == 1:
+                    data['venues'][0]['open_dates'] = open_dates
                 data['rows'] = []
         self._mutate_data(campaign_id, change)
 
@@ -263,10 +316,17 @@ class CampaignStore:
             else:
                 changed = person['availability'] != formatted
             person['availability'] = formatted
+            if snapshot.get('venue_rule') is not None:
+                rule = snapshot['venue_rule']
+                previous_rule = data.setdefault('performer_venue_rules', {}).get(performer_key(snapshot['name']))
+                changed = changed or rule != previous_rule
+                data['performer_venue_rules'][performer_key(snapshot['name'])] = rule
             if changed:
                 data['rows'] = []
             draft.update(last_applied=snapshot['signature'], formatted=formatted,
                          status='Updated · ' + (formatted or 'No matching open dates'), review_notes=explanation)
+            if snapshot.get('venue_rule') is not None:
+                draft['last_applied'] = request_signature(draft, data)
             return True
         return self._mutate_data(campaign_id, change)
 

@@ -19,6 +19,10 @@ from appearance import PALETTES, configure_appearance, normalize_mode
 from resizable_notes import ResizableNotes
 from confirmation_templates import DEFAULT_TEMPLATE, TEMPLATE_FIELDS, render_confirmation, render_schedule_template
 from template_library import TemplateDialog
+from venue_support import (schedule_venues, venue_rule, combined_dates, date_text,
+                           format_venue_availability, generate_venue_schedule, alternate_venue_schedule, parse_venue_import)
+from venue_widgets import VenueDatesEditor, PerformerVenuesDialog
+from schedule_grid import ScheduleGrid
 
 
 class AvailabilityApp(tk.Tk):
@@ -45,6 +49,9 @@ class AvailabilityApp(tk.Tk):
         self.minsize(520, 400)
         self.performers = []
         self.rows = []
+        self.row_venues = []
+        self.venues = schedule_venues({})
+        self.venue_mode = False
         self._schedule_edit = None
         self.gap = tk.StringVar(value='7')
         self.ai_api_key = tk.StringVar(value='')
@@ -119,6 +126,7 @@ class AvailabilityApp(tk.Tk):
             messagebox.showerror('Appearance could not be saved', str(error), parent=self)
             return
         configure_appearance(self, mode)
+        self.table._queue_paint()
         self.appearance_mode.set(mode)
         self.appearance_label.set(f'☀\ufe0e Appearance · {mode} ▾')
 
@@ -146,16 +154,14 @@ class AvailabilityApp(tk.Tk):
         ttk.Label(outer, text='Use M/D/YYYY for open dates. Paste availability with the importer or enter dates below.', style='Muted.TLabel').pack(anchor='w', pady=(0, 8))
         inputs = ttk.Frame(outer)
         inputs.pack(fill='both', expand=True)
-        inputs.columnconfigure(1, weight=1)
-        inputs.rowconfigure(0, weight=1)
-        dates_frame = ttk.LabelFrame(inputs, text='Open dates', padding=16)
-        dates_frame.grid(row=0, column=0, sticky='nsew', padx=(0, 10))
-        self.dates_text = ScrolledText(dates_frame, width=16, height=12, wrap='word', undo=True)
-        self.dates_text.pack(fill='both', expand=True)
-        self.dates_text.bind('<<Modified>>', self._text_changed)
-        ttk.Button(dates_frame, text='Copy dates', command=lambda: self._copy_text(self.dates_text.get('1.0', 'end-1c'))).pack(anchor='w', pady=(6, 0))
+        inputs.columnconfigure(0, weight=1)
+        inputs.rowconfigure(1, weight=1)
+        self.venue_dates = VenueDatesEditor(inputs, {}, self._venue_dates_changed, self._commit_venue_dates, width=16)
+        self.venue_dates.grid(row=0, column=0, sticky='ew')
+        self.dates_text = self.venue_dates.texts[0]
         people_frame = ttk.LabelFrame(inputs, text='Performer availability', padding=16)
-        people_frame.grid(row=0, column=1, sticky='nsew')
+        people_frame.grid(row=1, column=0, sticky='nsew')
+        self.venue_dates.set_people_panel(people_frame)
         people_toolbar = ttk.Frame(people_frame)
         people_toolbar.pack(fill='x', pady=(0, 6))
         ttk.Button(people_toolbar, text='Add performer…', command=self._add_performer).pack(side='left')
@@ -185,16 +191,22 @@ class AvailabilityApp(tk.Tk):
         copybar = ttk.Frame(results)
         copybar.pack(fill='x', pady=(0, 8))
         ttk.Button(copybar, text='Copy schedule', style='Quiet.TButton', command=self._copy_schedule).pack(side='left', padx=(0, 6))
-        ttk.Button(copybar, text='Copy selected', style='Quiet.TButton', command=lambda: self._copy_schedule(selected_only=True)).pack(side='left')
+        ttk.Button(copybar, text='Copy selection', style='Quiet.TButton', command=self._copy_schedule_selection).pack(side='left')
         ttk.Button(copybar, text='Copy totals', style='Quiet.TButton', command=lambda: self._copy_text(self.totals.get())).pack(side='left', padx=6)
         self.arrangement_status = tk.StringVar()
         ttk.Label(copybar, textvariable=self.arrangement_status, style='Muted.TLabel',
                   wraplength=360).pack(side='left', padx=(12, 0))
+        self.schedule_venue_tabs = ttk.Notebook(results, height=1, style='Venue.TNotebook')
+        self._schedule_venue_pages = {}
+        self._schedule_venue_signature = None
+        self._schedule_venue = None
+        self.schedule_venue_tabs.bind('<<NotebookTabChanged>>', self._schedule_venue_changed)
         table_frame = ttk.Frame(results)
         table_frame.pack(fill='both', expand=True)
-        self.table = ttk.Treeview(table_frame, columns=('date', 'performer', 'day'), show='headings', height=8)
+        self.schedule_table_frame = table_frame
+        self.table = ScheduleGrid(table_frame, columns=('date', 'performer', 'day'), show='headings', height=8)
         for key, title, width in [('date', 'Date', 120), ('performer', 'Performer', 350), ('day', 'Day', 120)]:
-            self.table.heading(key, text=title)
+            self.table.heading(key, text=title, command=lambda key=key: self.table.select_column(key))
             self.table.column(key, width=width)
         scroll = ttk.Scrollbar(table_frame, orient='vertical', command=lambda *args: self._scroll_schedule_table('y', *args))
         self.table.configure(yscrollcommand=scroll.set)
@@ -205,34 +217,11 @@ class AvailabilityApp(tk.Tk):
         self.table.pack(fill='both', expand=True)
         self.table.bind('<Double-1>', self._edit_schedule_cell)
         self.table.bind('<Return>', self._edit_schedule_cell)
-        self.table.bind('<Configure>', lambda event: self._finish_schedule_edit())
-        ttk.Label(results, text='Double-click a performer to change the booking, or select a row and press Enter. '
-                  'Type any name; leave blank to clear. Manual edits override scheduling rules.',
-                  style='Muted.TLabel', wraplength=950).pack(anchor='w', pady=(6, 0))
+        self.table.bind('<Configure>', lambda event: self._finish_schedule_edit(), add=True)
+
         for modifier in self._copy_modifiers():
-            self.table.bind(f'<{modifier}-c>', lambda event: self._copy_schedule(selected_only=bool(self.table.selection())))
+            self.table.bind(f'<{modifier}-c>', self._copy_schedule_selection)
         ttk.Label(results, textvariable=self.totals, wraplength=950).pack(anchor='w', pady=(8, 0))
-        names = ttk.LabelFrame(outer, text='Names in schedule order', padding=16)
-        names.pack(fill='both', expand=True, pady=(12, 0))
-        names_toolbar = ttk.Frame(names)
-        names_toolbar.pack(fill='x', pady=(0, 8))
-        ttk.Button(names_toolbar, text='Copy names', style='Quiet.TButton', command=self._copy_names).pack(side='left')
-        ttk.Button(names_toolbar, text='Copy selected names', style='Quiet.TButton', command=lambda: self._copy_names(True)).pack(side='left', padx=8)
-        ttk.Label(names_toolbar, text='One name per date · Blank rows are unfilled.', style='Muted.TLabel').pack(side='left')
-        names_frame = ttk.Frame(names)
-        names_frame.pack(fill='both', expand=True)
-        self.names_table = ttk.Treeview(names_frame, columns=('performer',), show='headings', height=6)
-        self.names_table.heading('performer', text='Performer')
-        self.names_table.column('performer', width=500)
-        names_scroll = ttk.Scrollbar(names_frame, orient='vertical', command=self.names_table.yview)
-        self.names_table.configure(yscrollcommand=names_scroll.set)
-        names_scroll.pack(side='right', fill='y')
-        names_horizontal = ttk.Scrollbar(names_frame, orient='horizontal', command=self.names_table.xview)
-        self.names_table.configure(xscrollcommand=names_horizontal.set)
-        names_horizontal.pack(side='bottom', fill='x')
-        self.names_table.pack(fill='both', expand=True)
-        for modifier in self._copy_modifiers():
-            self.names_table.bind(f'<{modifier}-c>', lambda event: self._copy_names(bool(self.names_table.selection())))
         template_panel = ttk.LabelFrame(outer, text='Confirmation template', padding=16)
         template_panel.pack(fill='x', pady=(12, 0))
         template_tools = ttk.Frame(template_panel)
@@ -252,14 +241,10 @@ class AvailabilityApp(tk.Tk):
         self.template_text.insert('1.0', DEFAULT_TEMPLATE)
         self.template_text.edit_modified(False)
         self.template_text.bind('<<Modified>>', self._template_changed)
-        ttk.Label(template_panel, text='@performer  Name     @pdates  Confirmed dates     @dates  Open dates\n'
-                  '@count  Gig count     @schedule  Schedule name     @notes  Notes',
+        ttk.Label(template_panel, text='@performer  Name     @pdates  Confirmed dates     @dates  Open dates     @count  Gig count     @schedule  Schedule name     @notes  Notes',
                   style='Muted.TLabel', wraplength=850).pack(anchor='w', pady=(8, 0))
         ttk.Button(template_panel, text='Restore default template', style='Quiet.TButton',
                    command=self._reset_template).pack(anchor='w', pady=(6, 0))
-        ttk.Label(template_panel, text='Each script below is editable and saves automatically. '
-                  'Edited scripts stay as written; Use template restores automatic wording and dates.',
-                  style='Muted.TLabel', wraplength=850).pack(anchor='w', pady=(8, 0))
         self.confirmations = ttk.LabelFrame(outer, text='Confirmation scripts', padding=16)
         self.confirmations.pack(fill='both', expand=True, pady=(12, 0))
         ttk.Label(outer, textvariable=self.status, wraplength=1000, style='Muted.TLabel').pack(anchor='w', pady=(8, 0))
@@ -488,7 +473,7 @@ class AvailabilityApp(tk.Tk):
             booked_count = sum(row.get('performer') is not None for row in data.get('rows', []))
         else:
             self._flush_input_changes()
-            open_text = self.dates_text.get('1.0', 'end-1c')
+            open_text = self.venue_dates.combined_text()
             schedule_name = self.campaign_name.get()
             booked_count = sum(name is not None for _, name in self.rows)
         # Resolve before editing so a malformed date cannot cause a partial import.
@@ -572,7 +557,12 @@ class AvailabilityApp(tk.Tk):
                 return
             snapshot = dict(name=draft['name'].strip(), availability=draft['availability'].strip(),
                             signature=signature, previous_availability=performer_value(data, draft['name']), dates=dates)
-            result = format_inline(snapshot['name'], snapshot['availability'], dates)
+            venues = schedule_venues(data)
+            if data.get('venues'):
+                result, snapshot['venue_rule'] = format_venue_availability(
+                    snapshot['name'], snapshot['availability'], venues, venue_rule(data, snapshot['name']))
+            else:
+                result = format_inline(snapshot['name'], snapshot['availability'], dates)
             if snapshot['name'] not in result.availability:
                 self._inline_status(schedule_id, row_id, 'Needs review · ' +
                                     (' '.join(result.notes) or 'Clarify the availability and retry.'), signature)
@@ -583,6 +573,7 @@ class AvailabilityApp(tk.Tk):
             applied = self.store.apply_inline_result(schedule_id, row_id, snapshot, confirmed, '\n'.join(result.notes))
             if applied and self.campaign_id == schedule_id:
                 self._apply_availability_import({snapshot['name']: confirmed})
+                self._update_performer_venue_buttons()
             if not applied:
                 self._inline_status(schedule_id, row_id, 'Schedule changed. Retry formatting.')
             if editor is not None:
@@ -590,6 +581,113 @@ class AvailabilityApp(tk.Tk):
         except Exception as error:
             self._inline_status(schedule_id, row_id, str(error) if isinstance(error, (ValueError, OSError))
                                 else 'Could not format availability. Retry formatting.')
+
+    def _venue_dates_changed(self):
+        self.dates_text = self.venue_dates.texts[0]
+        if not self._loading:
+            self.venues = self.venue_dates.snapshot()
+            self.venue_mode = self.venue_dates.explicit
+            self._invalidate()
+
+    def _commit_venue_dates(self, event=None):
+        if self._loading or self.campaign_id is None:
+            return
+        signature = repr(self.venue_dates.snapshot())
+        if signature == self._last_venue_dates_committed:
+            return
+        if self._save_campaign():
+            self._last_venue_dates_committed = signature
+            self._configure_venue_views()
+            self._update_performer_venue_buttons()
+            for draft in self.store.load(self.campaign_id)['data'].get('availability_drafts', []):
+                if draft['name'].strip() and draft['availability'].strip():
+                    self._convert_inline(self.campaign_id, draft['id'])
+
+    def _edit_performer_venues(self, schedule_id, name):
+        if not self._flush_inline_editors() or not self._save_campaign():
+            return
+        try:
+            data = self.store.load(schedule_id)['data']
+            dialog = PerformerVenuesDialog(self, data, name)
+            if dialog.result is None:
+                return
+            result = dialog.result
+            self.store.save_performer_venues(schedule_id, name, result['rule'], result['raw'], result['dates'])
+            self._reload_venue_views(schedule_id)
+        except Exception as error:
+            messagebox.showerror('Venue availability could not be saved', str(error), parent=self)
+
+    def _reload_venue_views(self, schedule_id):
+        if self.campaign_id == schedule_id:
+            self._open_campaign(schedule_id, save_current=False)
+        else:
+            self._refresh_campaigns()
+
+    def _configure_venue_views(self):
+        multi = len(self.venues) > 1
+        columns = ('date', 'performer', 'venue', 'day') if multi else ('date', 'performer', 'day')
+        self.table.configure(columns=columns)
+        for key in columns:
+            self.table.heading(key, text=key.title(), command=lambda key=key: self.table.select_column(key))
+            self.table.column(key, width=300 if key == 'performer' else 150)
+        self._configure_schedule_venues()
+
+    def _configure_schedule_venues(self):
+        signature = tuple((venue['id'], venue['name']) for venue in self.venues)
+        if signature == self._schedule_venue_signature:
+            return
+        self._schedule_venue_signature = signature
+        for page in self._schedule_venue_pages.values():
+            self.schedule_venue_tabs.forget(page)
+            page.destroy()
+        self._schedule_venue_pages = {}
+        for venue in self.venues:
+            page = ttk.Frame(self.schedule_venue_tabs)
+            self.schedule_venue_tabs.add(page, text=venue['name'])
+            self._schedule_venue_pages[venue['id']] = page
+        if self._schedule_venue not in self._schedule_venue_pages:
+            self._schedule_venue = self.venues[0]['id']
+        self.schedule_venue_tabs.select(self._schedule_venue_pages[self._schedule_venue])
+        if len(self.venues) > 1:
+            self.schedule_venue_tabs.pack(fill='x', before=self.schedule_table_frame, pady=(0, 4))
+        else:
+            self.schedule_venue_tabs.pack_forget()
+        self._render_schedule_rows()
+
+    def _schedule_venue_changed(self, event=None):
+        selected = self.schedule_venue_tabs.select()
+        venue_id = next((vid for vid, page in self._schedule_venue_pages.items() if str(page) == selected), None)
+        if venue_id is not None:
+            self._finish_schedule_edit()
+            self._schedule_venue = venue_id
+            self._render_schedule_rows()
+
+    def _render_schedule_rows(self):
+        self.table.delete(*self.table.get_children())
+        venue_names = {venue['id']: venue['name'] for venue in self.venues}
+        for index, (date, name) in enumerate(self.rows):
+            venue_id = self.row_venues[index] if index < len(self.row_venues) else self.venues[0]['id']
+            if len(self.venues) > 1 and venue_id != self._schedule_venue:
+                continue
+            values = [date.strftime('%m/%d/%Y'), name or '']
+            if len(self.venues) > 1:
+                values.append(venue_names.get(venue_id, 'Main venue'))
+            values.append(date.strftime('%A'))
+            self.table.insert('', 'end', iid=str(index), values=values)
+        self.table.yview_moveto(0)
+
+    def _update_performer_venue_buttons(self):
+        if self.campaign_id is None:
+            return
+        data = self.store.load(self.campaign_id)['data']
+        for name, entry, _ in self.performers:
+            if self.venue_mode:
+                rule = venue_rule(data, name)
+                mode = 'By venue' if rule['mode'] == 'by_venue' else 'Shared dates'
+                entry.venue_button.configure(text=f'{mode} · {len(rule["venues"])} venues…')
+                entry.venue_button.pack(side='right', padx=8)
+            else:
+                entry.venue_button.pack_forget()
 
     def _refresh_folders(self):
         folders = self.store.list_folders()
@@ -995,8 +1093,8 @@ class AvailabilityApp(tk.Tk):
             return
         self.campaign_list.set_all_expanded(expanded)
 
-    def _open_campaign(self, campaign_id):
-        if not self._flush_inline_editors() or not self._save_home_notes() or not self._save_campaign():
+    def _open_campaign(self, campaign_id, save_current=True):
+        if not self._flush_inline_editors() or not self._save_home_notes() or (save_current and not self._save_campaign()):
             return
         try:
             campaign = self.store.load(campaign_id)
@@ -1010,6 +1108,11 @@ class AvailabilityApp(tk.Tk):
             self._cancel_template_refresh()
             self.notes_text.collapse()
             self.campaign_id = campaign_id
+            self.venues = schedule_venues(data)
+            self.venue_mode = bool(data.get('venues'))
+            self.venue_dates.load(data)
+            self._last_venue_dates_committed = repr(self.venue_dates.snapshot())
+            self.dates_text = self.venue_dates.texts[0]
             self.campaign_name.set(campaign['name'])
             self.notes_text.delete('1.0', 'end')
             self.notes_text.insert('1.0', data.get('notes', ''))
@@ -1026,15 +1129,14 @@ class AvailabilityApp(tk.Tk):
             saved_scripts = data.get('confirmation_scripts', {})
             self.confirmation_overrides = {name: text for name, text in saved_scripts.items()
                                            if isinstance(name, str) and isinstance(text, str)} if isinstance(saved_scripts, dict) else {}
-            self.dates_text.delete('1.0', 'end')
-            self.dates_text.insert('1.0', data.get('open_dates', ''))
-            self.dates_text.edit_modified(False)
-            self.dates_text.edit_reset()
             self.gap.set(data.get('minimum_gap', '7'))
             self.ai_model.set(data.get('ai_model', configured_model()))
             for performer in schedule_performers(data):
                 self._performer_row(performer['name'], performer['availability'])
             self.rows = rows
+            self.row_venues = [row.get('venue', self.venues[0]['id']) for row in data.get('rows', [])]
+            self._configure_venue_views()
+            self._update_performer_venue_buttons()
             if rows:
                 self._render_schedule()
             else:
@@ -1106,7 +1208,7 @@ class AvailabilityApp(tk.Tk):
 
     def _flush_input_changes(self):
         # Capture edits even if their Tk Modified event is still queued.
-        fields = [self.dates_text] + [entry for _, entry, _ in self.performers]
+        fields = self.venue_dates.texts + [entry for _, entry, _ in self.performers]
         if any(field.edit_modified() for field in fields):
             for field in fields:
                 field.edit_modified(False)
@@ -1128,8 +1230,10 @@ class AvailabilityApp(tk.Tk):
             self._save_job = None
         if self.campaign_id is None or not self._dirty:
             return True
+        self.venues = self.venue_dates.snapshot()
+        self.venue_mode = self.venue_dates.explicit
         fields = {
-            'open_dates': self.dates_text.get('1.0', 'end-1c'),
+            'open_dates': self.venue_dates.combined_text(),
             'minimum_gap': self.gap.get(),
             'ai_model': self.ai_model.get(),
             'notes': self.notes_text.get('1.0', 'end-1c'),
@@ -1137,11 +1241,18 @@ class AvailabilityApp(tk.Tk):
             'confirmation_scripts': dict(self.confirmation_overrides),
             'performers': [{'name': name, 'availability': entry.get('1.0', 'end-1c')}
                            for name, entry, _ in self.performers],
-            'rows': [{'date': date.isoformat(), 'performer': name} for date, name in self.rows],
+            'rows': [dict(date=date.isoformat(), performer=name,
+                          **({'venue': self.row_venues[i]} if len(self.venues) > 1 else {}))
+                     for i, (date, name) in enumerate(self.rows)],
         }
         try:
             data = self.store.load(self.campaign_id)['data']
+            if self.venue_dates.explicit and self.venue_dates.snapshot() != data.get('venues'):
+                self.store.save_venues(self.campaign_id, self.venue_dates.snapshot(), validate=False)
+                data = self.store.load(self.campaign_id)['data']
             sync_schedule_performers(data, fields['performers'])
+            if data.get('venues') and len(data['venues']) == 1:
+                data['venues'][0]['open_dates'] = fields['open_dates']
             data.update(fields)
             self.store.save(self.campaign_id, data)
         except Exception as error:
@@ -1205,12 +1316,17 @@ class AvailabilityApp(tk.Tk):
         # Read the live fields even if the short preview debounce is pending.
         dates = [date for date, performer in self.rows if performer == name]
         try:
-            open_dates = parse_open_dates(self.dates_text.get('1.0', 'end-1c'))
+            open_dates = parse_open_dates(self.venue_dates.combined_text())
         except ValueError:
             open_dates = []
+        labels = None
+        if len(self.venues) > 1:
+            venues = {v['id']: v['name'] for v in self.venues}
+            labels = [f'{day.month}/{day.day}/{day.year} ({venues[self.row_venues[i]]})'
+                      for i, (day, performer) in enumerate(self.rows) if performer == name]
         return render_confirmation(self.template_text.get('1.0', 'end-1c'),
                                performer=name, confirmed_dates=dates, open_dates=open_dates,
-                               schedule=self.campaign_name.get(), notes=self.notes_text.get('1.0', 'end-1c'))
+                               schedule=self.campaign_name.get(), notes=self.notes_text.get('1.0', 'end-1c'), date_labels=labels)
 
     def _capture_confirmation_edits(self):
         if self._loading:
@@ -1267,14 +1383,12 @@ class AvailabilityApp(tk.Tk):
         for child in self.confirmations.winfo_children():
             child.destroy()
         try:
-            open_dates = parse_open_dates(self.dates_text.get('1.0', 'end-1c'))
+            open_dates = parse_open_dates(self.venue_dates.combined_text())
         except ValueError:
             open_dates = []
         template = self.template_text.get('1.0', 'end-1c')
         for name, dates in dates_by_performer.items():
-            message = render_confirmation(template, performer=name, confirmed_dates=dates,
-                                          open_dates=open_dates, schedule=self.campaign_name.get(),
-                                          notes=self.notes_text.get('1.0', 'end-1c'))
+            message = self._automatic_confirmation(name)
             message = self.confirmation_overrides.get(name, message)
             frame = ttk.Frame(self.confirmations)
             frame.pack(fill='x', pady=(0, 10))
@@ -1394,7 +1508,7 @@ class AvailabilityApp(tk.Tk):
         selected = set(self.table.selection())
         items = [item for item in self.table.get_children() if not selected_only or item in selected]
         if items:
-            lines = ['Date\tPerformer\tDay']
+            lines = ['\t'.join(self.table.heading(key, 'text') for key in self.table['columns'])]
             lines.extend('\t'.join(map(str, self.table.item(item, 'values'))) for item in items)
             self._copy_text('\n'.join(lines))
         return 'break'
@@ -1403,14 +1517,16 @@ class AvailabilityApp(tk.Tk):
         lines = [f'{name} - {entry.get("1.0", "end-1c").strip()}' for name, entry, _ in self.performers]
         return self._copy_text('\n'.join(lines))
 
-    def _copy_names(self, selected_only=False):
-        selected = set(self.names_table.selection())
-        items = [item for item in self.names_table.get_children() if not selected_only or item in selected]
-        if items:
-            # No header, dates, or totals: paste directly into one table column.
-            value = '\n'.join(str(self.names_table.item(item, 'values')[0]) for item in items)
-            self._copy_text(value or '\n')
-        return 'break'
+    def _copy_whole_column(self, column):
+        self.table.select_column(column)
+        return self._copy_schedule_selection()
+
+    def _copy_schedule_selection(self, event=None):
+        self._finish_schedule_edit()
+        value = self.table.selection_text()
+        if value is not None:
+            return self._copy_text(value or '\n')
+        return self._copy_schedule(selected_only=bool(self.table.selection()))
 
     def _select_all(self, event):
         widget = event.widget
@@ -1421,6 +1537,12 @@ class AvailabilityApp(tk.Tk):
             return 'break'
         if isinstance(widget, (tk.Entry, ttk.Entry)):
             widget.selection_range(0, 'end')
+            return 'break'
+        if widget is self.table:
+            rows = self.table.get_children()
+            if rows:
+                self.table.select_cell(rows[0], 0)
+                self.table.select_cell(rows[-1], len(self.table['columns']) - 1, extend=True)
             return 'break'
         if isinstance(widget, (ttk.Treeview, ScheduleList)):
             widget.selection_set(widget.get_children())
@@ -1439,13 +1561,26 @@ class AvailabilityApp(tk.Tk):
         menu = tk.Menu(widget.winfo_toplevel(), tearoff=False)
         self._active_copy_menu = menu
         if isinstance(widget, ttk.Treeview):
-            copy_rows = self._copy_names if widget is self.names_table else self._copy_schedule
+            copy_rows = self._copy_schedule
             item = widget.identify_row(event.y)
+            if widget is self.table and item:
+                column = widget.identify_column(event.x)
+                if column and column != '#0':
+                    col = int(column[1:]) - 1
+                    rows, columns = widget.selected_cells()
+                    if item not in rows or col not in columns:
+                        widget.select_cell(item, col)
             if item and item not in widget.selection():
                 widget.selection_set(item)
             menu.add_command(label='Copy selected rows', command=lambda: copy_rows(True),
                              state='normal' if widget.selection() else 'disabled')
-            menu.add_command(label='Copy all names' if widget is self.names_table else 'Copy whole schedule', command=copy_rows)
+            if widget is self.table:
+                menu.add_command(label='Copy cells / column', command=self._copy_schedule_selection)
+                column = widget.identify_column(event.x)
+                if column and column != '#0':
+                    key = widget['columns'][int(column[1:]) - 1]
+                    menu.add_command(label=f'Copy {key} column', command=lambda key=key: self._copy_whole_column(key))
+            menu.add_command(label='Copy whole schedule', command=copy_rows)
             menu.add_command(label='Select all', command=lambda: self._select_all(event))
         elif isinstance(widget, (tk.Text, tk.Entry, ttk.Entry)):
             def copy_selection():
@@ -1485,8 +1620,8 @@ class AvailabilityApp(tk.Tk):
         self.alternate_button.configure(state='disabled')
         self.arrangement_status.set('')
         self.rows = []
+        self.row_venues = []
         self.table.delete(*self.table.get_children())
-        self.names_table.delete(*self.names_table.get_children())
         for child in self.confirmations.winfo_children():
             child.destroy()
         self.totals.set('')
@@ -1528,6 +1663,8 @@ class AvailabilityApp(tk.Tk):
         ttk.Checkbutton(content, text='Replace all performers with this import', variable=replace).pack(anchor='w')
         use_dates_check = ttk.Checkbutton(content, text='Also replace open dates with all dates from this import', variable=use_dates)
         use_dates_check.pack(anchor='w')
+        if len(self.venues) > 1:
+            use_dates_check.configure(state='disabled')
         ai_mode = tk.BooleanVar(dialog, value=False)
 
         def toggle_ai():
@@ -1535,7 +1672,7 @@ class AvailabilityApp(tk.Tk):
                 use_dates.set(False)
                 use_dates_check.configure(state='disabled')
             else:
-                use_dates_check.configure(state='normal')
+                use_dates_check.configure(state='disabled' if len(self.venues) > 1 else 'normal')
 
         ai_check = ttk.Checkbutton(content, text='Use AI conversion (OpenAI API)', variable=ai_mode, command=toggle_ai)
         ai_check.pack(anchor='w', pady=(10, 0))
@@ -1589,7 +1726,17 @@ class AvailabilityApp(tk.Tk):
                 dialog.grab_set()
 
             def apply_import():
+                if use_dates.get() and len(self.venues) > 1:
+                    messagebox.showerror('Edit venue dates separately', 'Use Edit venue dates to change each venue’s dates.', parent=preview)
+                    return
                 self._apply_availability_import(result.availability, replace.get(), use_dates.get())
+                if getattr(result, 'venue_rules', None):
+                    if not self._save_campaign():
+                        return
+                    for name, rule in result.venue_rules.items():
+                        self.store.save_performer_venues(self.campaign_id, name, rule,
+                            result.raw_availability[name], result.availability[name])
+                    self._open_campaign(self.campaign_id, save_current=False)
                 preview.destroy()
                 dialog.destroy()
                 self.status.set(f'Imported {len(result.availability)} performers. Generate a schedule to see results.')
@@ -1610,11 +1757,13 @@ class AvailabilityApp(tk.Tk):
 
         def preview_import():
             try:
-                open_dates = parse_open_dates(self.dates_text.get('1.0', 'end'))
+                open_dates = parse_open_dates(self.venue_dates.combined_text())
                 year, month = infer_date_context(open_dates)
                 source = text.get('1.0', 'end')
                 if not ai_mode.get():
-                    show_preview(parse_import(source, year, month, open_dates))
+                    show_preview(parse_venue_import(source, self.venues,
+                                 self.store.load(self.campaign_id)['data'].get('performer_venue_rules', {})) if len(self.venues) > 1
+                                 else parse_import(source, year, month, open_dates))
                     return
             except ValueError as error:
                 messagebox.showerror('Check availability text', str(error), parent=dialog)
@@ -1645,6 +1794,18 @@ class AvailabilityApp(tk.Tk):
                 if error:
                     messagebox.showerror('AI conversion failed', error, parent=dialog)
                 else:
+                    if len(self.venues) > 1:
+                        local = parse_venue_import(source, self.venues,
+                            self.store.load(self.campaign_id)['data'].get('performer_venue_rules', {}))
+                        result.venue_rules, result.raw_availability = {}, {}
+                        names = {performer_key(name): name for name in result.availability}
+                        for name, rule in local.venue_rules.items():
+                            target = names.get(performer_key(name))
+                            if target:
+                                result.venue_rules[target] = rule
+                                result.raw_availability[target] = local.raw_availability[name]
+                                result.availability[target] = local.availability[name]
+                        result.notes.extend(local.notes)
                     show_preview(result)
 
             threading.Thread(target=work, daemon=True).start()
@@ -1713,6 +1874,10 @@ class AvailabilityApp(tk.Tk):
             self._invalidate()
 
         ttk.Button(header, text='Remove', command=remove).pack(side='right')
+        entry.venue_button = ttk.Button(header, text='Venues…', style='Quiet.TButton',
+                          command=lambda: self._edit_performer_venues(self.campaign_id, name))
+        if self.venue_mode:
+            entry.venue_button.pack(side='right', padx=8)
         self._bind_scrolling(frame)
 
     def _commit_schedule_availability(self, name, entry, status):
@@ -1757,7 +1922,7 @@ class AvailabilityApp(tk.Tk):
             gap = int(self.gap.get())
         except ValueError:
             raise ValueError('Minimum days between gigs must be a whole number.') from None
-        dates = parse_open_dates(self.dates_text.get('1.0', 'end'))
+        dates = parse_open_dates(self.venue_dates.combined_text())
         year, month = infer_date_context(dates)
         if not self.performers:
             raise ValueError('Enter at least one open date and add at least one performer.')
@@ -1775,25 +1940,32 @@ class AvailabilityApp(tk.Tk):
         self._flush_input_changes()
         try:
             gap, dates, people = self._read_inputs()
-            rows, counts = generate_schedule(dates, people, gap)
+            data = self.store.load(self.campaign_id)['data']
+            if data.get('venues'):
+                slots, counts = generate_venue_schedule(self.venues, people, data.get('performer_venue_rules', {}), gap)
+                rows = [(day, name) for day, _, name in slots]
+                venue_ids = [vid for _, vid, _ in slots]
+            else:
+                rows, counts = generate_schedule(dates, people, gap)
+                venue_ids = [self.venues[0]['id']] * len(rows)
         except ValueError as error:
             messagebox.showerror('Check your inputs', str(error), parent=self)
             return
         self._invalidate()
         self.rows = rows
+        self.row_venues = venue_ids
         self._render_schedule()
         self._queue_save()
 
     def _render_schedule(self):
         self.table.delete(*self.table.get_children())
-        self.names_table.delete(*self.names_table.get_children())
         self.alternate_button.configure(state='normal' if self.rows else 'disabled')
         counts = dict.fromkeys((name for name, _, _ in self.performers), 0)
-        for date, name in self.rows:
+        for _, name in self.rows:
             if name is not None:
                 counts[name] = counts.get(name, 0) + 1
-            self.table.insert('', 'end', values=(date.strftime('%m/%d/%Y'), name or 'Unassigned', date.strftime('%A')))
-            self.names_table.insert('', 'end', values=(name or '',))
+        self._configure_schedule_venues()
+        self._render_schedule_rows()
         self._show_confirmations()
         ranked_counts = sorted(counts.items(), key=lambda item: item[1], reverse=True)
         self.totals.set('   •   '.join(f'{name}: {count} gigs' for name, count in ranked_counts))
@@ -1807,6 +1979,9 @@ class AvailabilityApp(tk.Tk):
     def _edit_schedule_cell(self, event):
         self._finish_schedule_edit()
         if event.keysym == 'Return':
+            _, columns = self.table.selected_cells()
+            if columns and columns != [1]:
+                return 'break'
             selected = self.table.selection()
             item = selected[0] if selected else ''
         else:
@@ -1822,7 +1997,7 @@ class AvailabilityApp(tk.Tk):
         # commit a partially typed name.
         if not self._save_campaign():
             return
-        index = self.table.index(item)
+        index = int(item)
         self.table.selection_set(item)
         self.table.see(item)
         box = self.table.bbox(item, 'performer')
@@ -1861,11 +2036,16 @@ class AvailabilityApp(tk.Tk):
         date, previous = self.rows[index]
         if name == previous:
             return 'break'
+        if len(self.venues) > 1 and name is not None and any(
+                other is not None and performer_key(other) == performer_key(name) and day == date and i != index
+                for i, (day, other) in enumerate(self.rows)):
+            self.arrangement_status.set(f'{name} is already booked at another venue on {date:%m/%d/%Y}.')
+            return 'break'
         self.rows[index] = (date, name)
         self._render_schedule()
-        item = self.table.get_children()[index]
-        self.table.selection_set(item)
-        self.table.focus(item)
+        item = str(index)
+        if self.table.exists(item):
+            self.table.select_cell(item, 'performer')
         self.arrangement_status.set('Booking updated · saved automatically')
         self._queue_save()
         return 'break'
@@ -1877,7 +2057,13 @@ class AvailabilityApp(tk.Tk):
             return
         try:
             gap, dates, people = self._read_inputs()
-            result = alternate_schedule(dates, people, gap, self.rows)
+            data = self.store.load(self.campaign_id)['data']
+            multi = bool(data.get('venues'))
+            if multi:
+                previous = [(day, self.row_venues[i], name) for i, (day, name) in enumerate(self.rows)]
+                result = alternate_venue_schedule(self.venues, people, data.get('performer_venue_rules', {}), gap, previous)
+            else:
+                result = alternate_schedule(dates, people, gap, self.rows)
         except ValueError as error:
             messagebox.showerror('Check your inputs', str(error), parent=self)
             return
@@ -1885,8 +2071,14 @@ class AvailabilityApp(tk.Tk):
             self.arrangement_status.set('No alternative found with as many booked dates. Current schedule kept.')
             return
         rows, _ = result
+        if multi:
+            venue_ids = [vid for _, vid, _ in rows]
+            rows = [(day, name) for day, _, name in rows]
+        else:
+            venue_ids = [self.venues[0]['id']] * len(rows)
         self._clear_results()
         self.rows = rows
+        self.row_venues = venue_ids
         self._render_schedule()
         self.arrangement_status.set('New arrangement · saved automatically')
         self._queue_save()

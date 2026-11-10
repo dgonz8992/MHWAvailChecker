@@ -3,6 +3,39 @@
 A desktop application for scheduling performers on open dates. Enter open dates
 and add or import performer availability to get started.
 
+### Hotel schedules with multiple venues
+
+Click **+ Add venue** above the performer availability list on either schedule
+screen. Each venue has its own inline open dates section: edit its name and dates
+directly, then click outside to save. Open dates stay to the left of performers
+until a second venue is added, when performers move underneath the venue sections.
+Right-click a venue section and choose **Delete venue** to remove it. At least
+one open dates section remains. Date fields expand on focus, can be dragged taller, and collapse when you click
+away, just like notes. Incomplete date edits are saved as drafts.
+
+In **Generated schedule**, click a venue tab to show its dates and bookings.
+Click a column heading to select the entire column, or click/Shift-click cells
+to select a range. **Copy selection** and Cmd+C / Ctrl+C copy the values without
+headers, preserving blank bookings. **Copy schedule** copies the displayed
+venue's full table with headers. Double-click a performer cell to edit a booking.
+
+Each performer's **Shared dates / By venue** button opens venue checkboxes and
+an availability switch. **Shared dates** uses the same availability for checked
+venues; **By venue** lets you enter different availability per venue. Switching
+modes preserves the fields while the editor is open. When adding a venue,
+existing performers keep their previous venue eligibility until you select the
+new venue or paste availability naming it.
+
+Pasted text recognizes configured venue names, ignoring capitalization. For
+example, `All at Pool` selects Pool; `Lobby: only Fridays` followed by
+`Pool: only Saturdays` selects both and uses separate weekday rules. This works
+in performer fields and the local bulk importer. Unknown venue headings need
+review. The automatic schedule fills venue/date slots, shares gig counts across
+venues, applies the minimum spacing across all venues, and never puts a
+performer at two venues on the same date. Direct edits also block that conflict.
+Generated schedules, copied schedules, and automatic confirmation dates include
+the venue. Existing single-venue schedules continue to work.
+
 The **Templates** button above **Your Library** opens a dedicated page for reusable
 text shared by all schedules. Click **New template**, enter a name and body, and save it. Select
 a saved template to **Edit** or **Delete** it. **Import template** appears inside

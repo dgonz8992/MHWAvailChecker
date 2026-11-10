@@ -6,6 +6,8 @@ import uuid
 
 from inline_availability import performer_key, editor_drafts
 from scheduler import parse_open_dates
+from venue_support import schedule_venues, venue_rule
+from venue_widgets import VenueDatesEditor
 
 
 class PerformerEditor(ttk.Frame):
@@ -20,31 +22,27 @@ class PerformerEditor(ttk.Frame):
         self._closing = False
         self._dates_dirty = False
         data = app.store.load(schedule_id)['data']
-        self._last_dates_committed = data.get('open_dates', '')
+        self.venue_data = data
         inputs = ttk.Frame(self)
         inputs.pack(fill='x')
-        inputs.columnconfigure(1, weight=1)
-        dates_panel = ttk.LabelFrame(inputs, text='Open dates', padding=8)
-        dates_panel.grid(row=0, column=0, sticky='nsw', padx=(0, 12))
-        ttk.Label(dates_panel, text='M/D/YYYY', style='Caption.TLabel').pack(anchor='w', pady=(0, 4))
-        self.open_dates_text = ScrolledText(dates_panel, height=12, width=14, wrap='word', undo=True, padx=6, pady=4)
-        self.open_dates_text.pack(fill='both', expand=True)
+        inputs.columnconfigure(0, weight=1)
         self.date_status = tk.StringVar()
-        ttk.Label(dates_panel, textvariable=self.date_status, style='InlineStatus.TLabel',
-                  wraplength=128).pack(anchor='w', pady=(6, 0))
+        self.venue_dates = VenueDatesEditor(inputs, data, self._venue_dates_changed, self.commit_dates)
+        self.venue_dates.grid(row=0, column=0, sticky='ew')
+        self._last_dates_committed = repr(self.venue_dates.snapshot())
+        self.open_dates_text = self.venue_dates.texts[0]
+        ttk.Label(self.venue_dates, textvariable=self.date_status, style='InlineStatus.TLabel').pack(anchor='w')
         people_panel = ttk.Frame(inputs)
-        people_panel.grid(row=0, column=1, sticky='new')
+        people_panel.grid(row=1, column=0, sticky='new', pady=(8, 0))
+        self.venue_dates.set_people_panel(people_panel)
         tools = ttk.Frame(people_panel)
         tools.pack(fill='x', pady=(0, 6))
         ttk.Label(tools, text='PERFORMERS', style='Accent.TLabel').pack(side='left')
         ttk.Button(tools, text='Paste names', command=self.paste_clipboard,
                    state='disabled' if self.performer_query else 'normal').pack(side='right')
-        self.open_dates_text.insert('1.0', data.get('open_dates', ''))
-        self.open_dates_text.edit_modified(False)
-        self.open_dates_text.bind('<<Modified>>', self._dates_changed)
-        self.open_dates_text.bind('<FocusOut>', self.commit_dates)
-        self.open_dates_text.bind('<Control-Return>', self.commit_dates)
-        self.open_dates_text.bind('<Command-Return>', self.commit_dates)
+        venues = schedule_venues(data)
+        self.multi_venue = len(venues) > 1
+        self.has_venue_rules = bool(data.get('venues'))
         self._date_saved_status()
         helper = ttk.Label(people_panel, text='Dates and drafts save automatically. Leave a cell to format availability.',
                            style='Muted.TLabel', wraplength=300)
@@ -118,6 +116,7 @@ class PerformerEditor(ttk.Frame):
         actions.grid(row=0, column=2, sticky='n', padx=(8, 0))
         ttk.Button(actions, text='Retry', width=4, style='Quiet.TButton', command=lambda: self.commit(row, retry=True)).pack(side='left')
         ttk.Button(actions, text='Remove', width=6, style='Quiet.TButton', command=lambda: self.remove_row(row)).pack(side='left', padx=(4, 0))
+        self._venue_button(row)
         self.rows.append(row)
         row['name'].trace_add('write', lambda *args: self._edited(row))
         row['text'].bind('<<Modified>>', lambda event: self._text_changed(row))
@@ -131,6 +130,17 @@ class PerformerEditor(ttk.Frame):
             self._changed()
             self.app._bind_scrolling(frame)
         return row
+
+    def _venue_button(self, row):
+        if not self.has_venue_rules:
+            return
+        rule = venue_rule(self.venue_data, row['name'].get())
+        label = ('By venue' if rule['mode'] == 'by_venue' else 'Shared dates') + f' · {len(rule["venues"])} venues…'
+        if 'venue_button' not in row:
+            row['venue_button'] = ttk.Button(row['frame'], style='Quiet.TButton',
+                command=lambda: self.app._edit_performer_venues(self.schedule_id, row['name'].get().strip()))
+            row['venue_button'].grid(row=2, column=0, columnspan=3, sticky='w')
+        row['venue_button'].configure(text=label)
 
     def snapshot(self):
         return [dict(row['data'], name=row['name'].get(), availability=row['text'].get('1.0', 'end-1c'),
@@ -161,8 +171,9 @@ class PerformerEditor(ttk.Frame):
             self.after_cancel(self._save_job)
             self._save_job = None
         # Modified events can still be queued when navigation starts.
-        if self.open_dates_text.edit_modified():
-            self.open_dates_text.edit_modified(False)
+        if any(field.edit_modified() for field in self.venue_dates.texts):
+            for field in self.venue_dates.texts:
+                field.edit_modified(False)
             self._dates_dirty = self.dirty = True
         for row in self.rows:
             if row['text'].edit_modified():
@@ -174,7 +185,20 @@ class PerformerEditor(ttk.Frame):
             return True
         try:
             self.app.store.save_inline_editor(self.schedule_id, self.snapshot(),
-                                              self.open_dates_text.get('1.0', 'end-1c') if self._dates_dirty else None)
+                                              self.venue_dates.combined_text() if self._dates_dirty else None)
+            if self._dates_dirty and self.venue_dates.explicit:
+                self.app.store.save_venues(self.schedule_id, self.venue_dates.snapshot(), validate=False)
+                self.venue_data = self.app.store.load(self.schedule_id)['data']
+                self.has_venue_rules = True
+                self.multi_venue = len(self.venue_dates.cards) > 1
+                saved = {d['id']: d for d in self.venue_data.get('availability_drafts', [])}
+                for row in self.rows:
+                    draft = saved.get(row['data']['id'])
+                    if draft and draft['availability'] != row['text'].get('1.0', 'end-1c'):
+                        row['text'].delete('1.0', 'end')
+                        row['text'].insert('1.0', draft['availability'])
+                        row['text'].edit_modified(False)
+                    self._venue_button(row)
         except Exception as error:
             messagebox.showerror('Performer drafts could not be saved', str(error), parent=self)
             return False
@@ -186,15 +210,15 @@ class PerformerEditor(ttk.Frame):
 
     def _date_saved_status(self):
         try:
-            dates = parse_open_dates(self.open_dates_text.get('1.0', 'end-1c'))
+            dates = parse_open_dates(self.venue_dates.combined_text())
         except ValueError:
             self.date_status.set('Draft saved · use M/D/YYYY')
         else:
             self.date_status.set(f'{len(dates)} open dates · saved' if dates else 'Add open dates')
 
-    def _dates_changed(self, event):
-        if self.open_dates_text.edit_modified():
-            self.open_dates_text.edit_modified(False)
+    def _venue_dates_changed(self):
+        self.open_dates_text = self.venue_dates.texts[0]
+        if not self._loading:
             self._dates_dirty = True
             self.date_status.set('Saving…')
             self._changed()
@@ -202,15 +226,16 @@ class PerformerEditor(ttk.Frame):
     def commit_dates(self, event=None):
         if self._closing or not self.flush():
             return 'break'
-        text = self.open_dates_text.get('1.0', 'end-1c')
+        text = self.venue_dates.combined_text()
+        signature = repr(self.venue_dates.snapshot())
         try:
             dates = parse_open_dates(text)
         except ValueError:
             self.date_status.set('Draft saved · use M/D/YYYY')
             return 'break'
         self.date_status.set(f'{len(dates)} open dates · saved')
-        if text != self._last_dates_committed:
-            self._last_dates_committed = text
+        if signature != self._last_dates_committed:
+            self._last_dates_committed = signature
             for row in self.rows:
                 if row['name'].get().strip() and row['text'].get('1.0', 'end-1c').strip():
                     row['edited'] = False
@@ -282,6 +307,10 @@ class PerformerEditor(ttk.Frame):
         if draft and row and (row['name'].get(), row['text'].get('1.0', 'end-1c')) == (draft['name'], draft['availability']):
             row['data'] = dict(draft)
             row['status'].set(draft.get('status', ''))
+            if 'venue_button' in row:
+                rule = venue_rule(self.app.store.load(self.schedule_id)['data'], draft['name'])
+                row['venue_button'].configure(text=('By venue' if rule['mode'] == 'by_venue' else 'Shared dates')
+                                              + f' · {len(rule["venues"])} venues…')
 
     def destroy(self):
         self._closing = True

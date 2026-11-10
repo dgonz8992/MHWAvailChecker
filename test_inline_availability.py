@@ -393,7 +393,7 @@ class InlineDesktopTests(unittest.TestCase):
         self.assertEqual(self.store.load(self.schedule)['data']['notes'], 'Saved when clicking outside')
         self.assertEqual(self.errors, [])
 
-    def test_expanded_editor_fits_viewport_with_tall_dates_on_left(self):
+    def test_expanded_editor_fits_viewport_with_dates_on_left_by_default(self):
         self.editor.paste_names(NAMES)
         for width in (1180, 1000, 900):
             self.app.geometry(f'{width}x820')
@@ -404,11 +404,30 @@ class InlineDesktopTests(unittest.TestCase):
             dates = self.editor.open_dates_text
             row = self.editor.rows[0]
             self.assertLess(dates.winfo_rootx() + dates.winfo_width(), row['entry'].winfo_rootx())
-            self.assertGreater(dates.winfo_height(), dates.winfo_width())
             self.assertGreater(row['entry'].winfo_width(), 30)
             actions = row['frame'].winfo_children()[-1]
             self.assertLessEqual(actions.winfo_rootx() + actions.winfo_width(), editor_right)
             self.assertEqual(canvas.xview(), (0.0, 1.0))
+
+    def test_adding_venue_moves_performers_below_and_dates_resize(self):
+        editor = self.editor
+        field = editor.open_dates_text
+        self.assertFalse(editor.venue_dates.cards[0]['entry'].winfo_ismapped())
+        self.assertEqual(int(field.cget('height')), 12)
+        field._expand()
+        self.assertEqual(int(field.cget('height')), 18)
+        from types import SimpleNamespace
+        field._start_resize(SimpleNamespace(y_root=100))
+        field._resize(SimpleNamespace(y_root=180))
+        self.assertGreater(int(field.cget('height')), 18)
+        field._dragging = False
+        field.collapse()
+        self.assertEqual(int(field.cget('height')), 12)
+        editor.venue_dates.add_venue()
+        self.app.update()
+        self.assertTrue(editor.venue_dates.cards[0]['entry'].winfo_ismapped())
+        dates_bottom = max(text.winfo_rooty() + text.winfo_height() for text in editor.venue_dates.texts)
+        self.assertLess(dates_bottom, editor.rows[0]['entry'].winfo_rooty())
 
     def test_expand_add_rows_and_collapse_update_scroll_range(self):
         canvas = self.app.campaign_list.canvas

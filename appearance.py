@@ -59,6 +59,25 @@ def _button_layout(root, style, name, colors, key):
             ('Button.padding', {'sticky': 'nswe', 'children': [('Button.label', {'sticky': 'nswe'})]})]})]})]
 
 
+def _venue_tab_layout(root, style, palette, key):
+    elements = getattr(root, '_appearance_elements', {})
+    element = f'MHW.{key}.venue.tab'
+    if element not in elements:
+        images = []
+        for selected, background in ((False, palette['surface']), (True, palette['surface']), (False, palette['elevated'])):
+            image = tk.PhotoImage(master=root, width=24, height=24)
+            image.put(background, to=(0, 0, 24, 24))
+            if selected:
+                image.put(palette['accent'], to=(0, 22, 24, 24))
+            images.append(image)
+        style.element_create(element, 'image', images[0], ('selected', images[1]), ('active', images[2]),
+                             border=(4, 0, 4, 2), sticky='nswe')
+        elements[element] = images
+        root._appearance_elements = elements
+    return [(element, {'sticky': 'nswe', 'children': [
+        ('Notebook.padding', {'sticky': 'nswe', 'children': [('Notebook.label', {'sticky': 'nswe'})]})]})]
+
+
 def configure_appearance(root, mode='Default'):
     mode = normalize_mode(mode)
     palette = PALETTES[mode]
@@ -155,12 +174,17 @@ def configure_appearance(root, mode='Default'):
               background=[('readonly', p['elevated'])], bordercolor=[('focus', p['accent'])])
     style.configure('TLabelframe', background=p['surface'], bordercolor=p['line'], relief='solid', borderwidth=1)
     style.configure('TLabelframe.Label', background=p['surface'], foreground=p['ink'], font=(family, 12, 'bold'))
+    style.configure('Venue.TNotebook', background=p['surface'], borderwidth=0)
+    style.layout('Venue.TNotebook.Tab', _venue_tab_layout(root, style, p, key))
+    style.configure('Venue.TNotebook.Tab', foreground=p['muted'], padding=(14, 7))
+    style.map('Venue.TNotebook.Tab', foreground=[('selected', p['accent']), ('active', p['ink'])])
     style.configure('TSeparator', background=p['line'])
     style.configure('Accent.TSeparator', background=p['accent'])
     style.configure('TPanedwindow', background=p['backdrop'])
     style.configure('Sash', sashthickness=12, background=p['backdrop'])
     style.configure('Treeview', rowheight=30, background=p['surface'], fieldbackground=p['surface'], foreground=p['ink'],
                     borderwidth=0, bordercolor=p['line'], lightcolor=p['surface'], darkcolor=p['surface'])
+    style.map('Schedule.Treeview', background=[('selected', p['surface'])], foreground=[('selected', p['ink'])])
     style.configure('Treeview.Heading', background=p['elevated'], font=(family, 10, 'bold'),
                     foreground=p['muted'], padding=(8, 8), bordercolor=p['line'], relief='flat')
     style.map('Treeview.Heading', background=[('active', p['hover'])])

@@ -386,7 +386,7 @@ class CampaignDesktopTests(unittest.TestCase):
         self.app.update()
         self.assertIsNone(self.app.rows[0][1])
         self.assertIn('Alex: 1 gigs', self.app.totals.get())
-        self.assertEqual(self.app.names_table.item(self.app.names_table.get_children()[0], 'values'), ('',))
+        self.assertEqual(self.app.table.item(self.app.table.get_children()[0], 'values')[1], '')
         self.assertEqual(len(self.app.table.get_children()), 4)
         self.app._show_home()
         self.app._open_campaign(self.first)
@@ -495,7 +495,7 @@ class CampaignDesktopTests(unittest.TestCase):
         self.app.update()
         self.assertEqual(self.app.rows, expected_rows)
         self.assertEqual(self.app.totals.get(), expected_totals)
-        self.assertEqual(len(self.app.names_table.get_children()), 4)
+        self.assertEqual(len(self.app.table.get_children()), 4)
         frames = self.app.confirmations.winfo_children()
         self.assertEqual(len(frames), 2)
         frames[0].winfo_children()[0].winfo_children()[1].invoke()
@@ -515,8 +515,8 @@ class CampaignDesktopTests(unittest.TestCase):
         self.app.alternate_button.invoke()
         expected = list(self.app.rows)
         self.assertNotEqual(expected, before)
-        self.assertEqual([self.app.names_table.item(item, 'values')[0]
-                          for item in self.app.names_table.get_children()], [name for _, name in expected])
+        self.assertEqual([self.app.table.item(item, 'values')[1]
+                          for item in self.app.table.get_children()], [name for _, name in expected])
         for frame in self.app.confirmations.winfo_children():
             header = frame.winfo_children()[0]
             name = header.winfo_children()[0].cget('text')

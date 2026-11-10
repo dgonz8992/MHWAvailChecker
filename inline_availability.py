@@ -19,6 +19,8 @@ def validate_performer_names(people):
 
 def request_signature(draft, data):
     value = ['local-import-v2', draft['name'].strip(), draft['availability'].strip(), data.get('open_dates', '')]
+    if data.get('venues'):
+        value.extend([data['venues'], data.get('performer_venue_rules', {}).get(performer_key(draft['name']))])
     return hashlib.sha256(json.dumps(value, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -66,6 +68,9 @@ def sync_inline_performers(data, drafts):
         if not name or key in names:
             continue
         old_name = previous.get(draft['id'], {}).get('name', name)
+        rules = data.get('performer_venue_rules', {})
+        if performer_key(old_name) != key and performer_key(old_name) in rules:
+            rules[key] = rules.pop(performer_key(old_name))
         person = existing.get(performer_key(old_name)) or existing.get(key)
         value = person['availability'] if person else ''
         if not draft['availability'].strip():
@@ -76,6 +81,8 @@ def sync_inline_performers(data, drafts):
         data['rows'] = []
     data['performers'] = people
     data['availability_drafts'] = drafts
+    if 'performer_venue_rules' in data:
+        data['performer_venue_rules'] = {key: rule for key, rule in data['performer_venue_rules'].items() if key in names}
 
 
 def sync_schedule_performers(data, people):
@@ -98,6 +105,9 @@ def sync_schedule_performers(data, people):
     updated.extend(dict(draft) for draft in data.get('availability_drafts', []) if not draft['name'].strip())
     data['performers'] = [dict(person) for person in people]
     data['availability_drafts'] = updated
+    if 'performer_venue_rules' in data:
+        keys = {performer_key(person['name']) for person in people}
+        data['performer_venue_rules'] = {key: rule for key, rule in data['performer_venue_rules'].items() if key in keys}
 
 
 def format_inline(name, availability, dates):

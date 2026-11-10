@@ -34,12 +34,14 @@ def render_schedule_template(template, *, open_dates, schedule, notes, booked_co
                                         notes=notes, count=str(booked_count)))
 
 
-def render_confirmation(template, *, performer, confirmed_dates, open_dates, schedule, notes):
+def render_confirmation(template, *, performer, confirmed_dates, open_dates, schedule, notes, date_labels=None):
     if not template.strip():
         template = DEFAULT_TEMPLATE
     values = dict(performer=performer, pdates=format_dates(confirmed_dates),
                   dates=format_dates(open_dates), count=str(len(confirmed_dates)),
                   schedule=schedule, notes=notes)
+    if date_labels is not None:
+        values['pdates'] = ', '.join(date_labels)
     # Do not evaluate expressions or recursively expand tokens in user data.
     # @@ provides a literal @; unknown fields and email addresses remain intact.
     return _render_fields(template, values)
